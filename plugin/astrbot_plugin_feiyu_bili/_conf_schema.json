@@ -1,0 +1,15 @@
+{
+  "enabled":{"description":"浏览/点赞/分享总开关，后台活动仍需主人开启","type":"bool","default":true},
+  "topics":{"description":"公开兴趣种子（不是固定轮播表）；可沿首页和相关推荐自行拓展，不把私聊档案作为搜索词","type":"list","default":["明日方舟终末地","历史策略游戏","历史科普","电脑硬件"]},
+  "auto_like":{"description":"允许自主点赞（新安装默认关闭；只赞实际读了字幕且喜欢的内容，不取消已有赞）","type":"bool","default":false},
+  "daily_likes":{"description":"每日最多点赞占额；不明确结果也占额防重试（硬上限10）","type":"int","default":3},
+  "daily_shares":{"description":"每日QQ分享上限（硬上限3），不是必推条数","type":"int","default":2},
+  "daily_rounds":{"description":"每日活动轮次上限（手动自动共用，硬上限16），分享额度用完仍可自己浏览","type":"int","default":8},
+  "videos_per_round":{"description":"每次活动最多读取候选数量（硬上限5），可以只浏览/点赞而不分享","type":"int","default":3},
+  "share_cooldown_minutes":{"description":"自主分享最短间隔（分钟，最少30）；避免刚发一条又来找你","type":"int","default":120},
+  "quiet_start":{"description":"QQ免打扰开始小时UTC+8；期间仍可以浏览点赞，推荐暂存最多24小时","type":"int","default":23},
+  "quiet_end":{"description":"QQ免打扰结束小时UTC+8","type":"int","default":9},
+  "credential_file":{"description":"可选：容器内B站凭证JSON路径；只交给B站客户端，不传给模型","type":"string","default":""},
+  "provider_id":{"description":"留空跟随接收会话模型，不另存API密钥","type":"string","default":""},
+  "data_dir":{"description":"持久化浏览/点赞/分享记录目录，独立于长期记忆","type":"string","default":"data/plugin_data/astrbot_plugin_feiyu_bili"}
+}

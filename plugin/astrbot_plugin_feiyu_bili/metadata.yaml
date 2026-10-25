@@ -1,0 +1,8 @@
+name: astrbot_plugin_feiyu_bili
+display_name: 大肥鱼逛B站
+desc: 自主探索首页与相关推荐，按人格独立决定点赞和分享；支持自然聊天触发、可控限频与免打扰，不评论投币。
+version: v0.2.1
+author: 大肥鱼项目
+astrbot_version: '>=4.29.0'
+support_platforms:
+  - aiocqhttp

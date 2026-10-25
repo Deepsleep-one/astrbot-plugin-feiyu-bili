@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+*.tar.gz
+*.log
+.venv/
+bili_credential.json
+*credential*.json
+tests/.runs/
+tests/tmp*/
+plugin/**/tests/tmp*/
