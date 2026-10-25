@@ -213,5 +213,80 @@ class SchedulingTests(unittest.TestCase):
                 self.assertFalse(exploration.scheduler_due(None, value))
 
 
+class SharePacingTests(unittest.TestCase):
+    """The daily share budget must spread over the talkative window, not burst."""
+
+    def at(self, hour, minute=0):
+        return datetime(2026, 10, 25, hour, minute, tzinfo=TZ)
+
+    def test_allowance_unlocks_one_slot_at_a_time_across_the_day(self):
+        self.assertEqual(exploration.share_allowance(5, self.at(9)), 1)
+        self.assertEqual(exploration.share_allowance(5, self.at(12)), 2)
+        self.assertEqual(exploration.share_allowance(5, self.at(15)), 3)
+        self.assertEqual(exploration.share_allowance(5, self.at(18)), 4)
+        self.assertEqual(exploration.share_allowance(5, self.at(21)), 5)
+        self.assertEqual(exploration.share_allowance(5, self.at(22, 59)), 5)
+
+    def test_quiet_hours_and_empty_budget_unlock_nothing(self):
+        for hour in (23, 0, 3, 8):
+            with self.subTest(hour=hour):
+                self.assertEqual(exploration.share_allowance(5, self.at(hour)), 0)
+        self.assertEqual(exploration.share_allowance(0, self.at(15)), 0)
+        self.assertEqual(exploration.share_allowance(-2, self.at(15)), 0)
+        self.assertEqual(exploration.share_allowance(None, self.at(15)), 0)
+        self.assertEqual(exploration.share_allowance(5, None), 0)
+
+    def test_allowance_never_exceeds_the_daily_budget_and_is_monotonic(self):
+        seen = [exploration.share_allowance(3, self.at(h)) for h in range(9, 23)]
+        self.assertEqual(seen, sorted(seen))
+        self.assertLessEqual(max(seen), 3)
+        self.assertEqual(max(seen), 3)
+
+    def test_allowance_handles_no_quiet_hours(self):
+        self.assertEqual(exploration.share_allowance(5, self.at(0), 9, 9), 1)
+        self.assertEqual(exploration.share_allowance(5, self.at(20), 9, 9), 5)
+
+    def test_active_minutes_left_counts_down_to_quiet_start(self):
+        self.assertEqual(exploration.active_minutes_left(self.at(9)), 14 * 60)
+        self.assertEqual(exploration.active_minutes_left(self.at(20)), 3 * 60)
+        self.assertEqual(exploration.active_minutes_left(self.at(23)), 0)
+        self.assertEqual(exploration.active_minutes_left(self.at(4)), 0)
+        self.assertEqual(exploration.active_minutes_left(None), 14 * 60)
+
+    def test_align_to_window_pushes_night_rounds_to_the_opening(self):
+        def stamp(hour, minute=0):
+            return datetime(2026, 10, 25, hour, minute, tzinfo=TZ).isoformat()
+
+        for hour, minute in ((9, 0), (12, 30), (22, 59)):
+            with self.subTest(hour=hour):
+                self.assertEqual(exploration.align_to_window(stamp(hour, minute)), stamp(hour, minute))
+        # same evening after quiet starts -> tomorrow morning
+        for hour, minute in ((23, 0), (23, 30)):
+            with self.subTest(hour=hour):
+                moved = datetime.fromisoformat(exploration.align_to_window(stamp(hour, minute)))
+                self.assertEqual((moved.hour, moved.minute), (9, 0))
+                self.assertEqual(moved.date(), datetime(2026, 10, 26).date())
+        # already past midnight -> this morning
+        for hour, minute in ((0, 20), (3, 44), (8, 59)):
+            with self.subTest(hour=hour):
+                moved = datetime.fromisoformat(exploration.align_to_window(stamp(hour, minute)))
+                self.assertEqual((moved.hour, moved.minute), (9, 0))
+                self.assertEqual(moved.date(), datetime(2026, 10, 25).date())
+        # garbage in, unchanged out (the caller's own validation still applies)
+        for value in ('invalid', None, 0):
+            with self.subTest(value=value):
+                self.assertEqual(exploration.align_to_window(value), value)
+        # no quiet hours -> never moved
+        self.assertEqual(exploration.align_to_window(stamp(3), 9, 9), stamp(3))
+
+    def test_spread_rest_divides_and_clamps(self):
+        self.assertEqual(exploration.spread_rest(840, 5), 168)
+        self.assertEqual(exploration.spread_rest(840, 10), 84)
+        self.assertEqual(exploration.spread_rest(120, 9), 30)
+        self.assertEqual(exploration.spread_rest(0, 3), 240)
+        self.assertEqual(exploration.spread_rest(None, None), 60)
+        self.assertEqual(exploration.spread_rest(-5, 2), 240)
+
+
 if __name__ == '__main__':
     unittest.main()
