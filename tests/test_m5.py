@@ -342,5 +342,81 @@ class PluginShadowTests(unittest.IsolatedAsyncioTestCase):
         self.instance._maybe_auto_look.assert_not_awaited()
 
 
+class AutonomyResilienceTests(unittest.IsolatedAsyncioTestCase):
+    """A transient error must not end autonomy for the day, and the daily cap is ten."""
+
+    async def asyncSetUp(self):
+        self.plugin = support.plugin
+        self.run_root = TESTS / ".runs"
+        self.run_path = self.run_root / uuid4().hex
+        self.run_path.mkdir(parents=True)
+        self.store = core.Store(self.run_path / "browse.db")
+        db = Mock(spec_set=support.ReadOnlyMemoryDB)
+        db.get_owner = Mock(return_value=support.OWNER)
+        db.build_context = Mock(return_value={"state": "离线状态", "memory": ""})
+        memory = Mock(spec_set=["_identity", "_safe_store", "_persona"])
+        memory._identity.side_effect = lambda event: dict(event.identity)
+        memory._safe_store.return_value = db
+        memory._persona.return_value = "现有人格，不是通用助手"
+        meta = SimpleNamespace(name="astrbot_plugin_feiyu_memory", activated=True, star_cls=memory)
+        self.context = Mock()
+        self.context.get_all_stars = Mock(return_value=[meta])
+        self.context.persona_manager = None
+        self.context.send_message = AsyncMock(True)
+        self.context.get_current_chat_provider_id = AsyncMock(return_value="current-chat-model")
+        self.context.llm_generate = AsyncMock(return_value=SimpleNamespace(completion_text="{}"))
+        self.instance = self.plugin.FeiyuBiliPlugin(self.context, {})
+        self.instance.store = self.store
+        self.instance.rstore = rs.ReadingStore(self.run_path / "browse.db")
+        self.instance.browser = Mock()
+        self.instance.browser.lock = asyncio.Lock()
+        self.instance.browser.flush_pending = AsyncMock(0)
+        self.instance.browser.run = AsyncMock(return_value={"status": "ok", "read": 1, "sent": 0, "liked": 0})
+        self.instance.client = Mock()
+        self.store.set("binding", dict(BINDING))
+        self.store.set("auto", True)
+
+    async def asyncTearDown(self):
+        self.instance.rstore.close()
+        self.store.close()
+        resolved = self.run_path.resolve()
+        self.assertEqual(resolved.parent, self.run_root.resolve())
+        shutil.rmtree(resolved, ignore_errors=True)
+
+    async def test_first_failure_backs_off_instead_of_stopping(self):
+        self.instance._after_failure(RuntimeError("人格未能读取，拒绝使用通用助手替代"), 1)
+        self.assertTrue(self.store.get("auto"), "一次瞬时失败不该关掉自主活动")
+        due = datetime.fromisoformat(self.store.get("next_wake"))
+        minutes = (due - core.now()).total_seconds() / 60
+        self.assertGreaterEqual(minutes, 25)
+        self.assertLessEqual(minutes, 40)
+        error = json.loads(self.store.get("last_error"))
+        self.assertEqual(error["type"], "RuntimeError")
+        self.assertIn("人格未能读取", error["message"])
+
+    async def test_third_consecutive_failure_pauses_and_keeps_reason(self):
+        for attempt in (1, 2):
+            self.instance._after_failure(RuntimeError("网络没连上B站"), attempt)
+            self.assertTrue(self.store.get("auto"))
+        self.instance._after_failure(RuntimeError("网络没连上B站"), 3)
+        self.assertFalse(self.store.get("auto"), "连续 3 次失败才暂停")
+        self.assertIn("网络没连上B站", json.loads(self.store.get("last_error"))["message"])
+
+    async def test_daily_round_cap_is_ten_by_default(self):
+        from datetime import datetime as dt, timedelta as td
+        past = (dt.now(core.TZ) - td(minutes=5)).isoformat()
+        for _ in range(9):
+            self.store.begin_round(False, 16)
+        self.store.set("next_wake", past)
+        await self.instance._tick()
+        self.assertEqual(self.instance.browser.run.await_count, 1, "第 9 轮仍该跑")
+
+        self.instance.browser.run.reset_mock()
+        self.store.begin_round(False, 16)  # 第 10 轮用掉，到了上限
+        self.store.set("next_wake", past)
+        await self.instance._tick()
+        self.assertEqual(self.instance.browser.run.await_count, 0, "默认上限是 10 轮，第 10 轮后不再跑")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

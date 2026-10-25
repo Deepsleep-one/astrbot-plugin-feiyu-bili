@@ -179,7 +179,10 @@ class Browser:
                 return int(status=='sent')
         return 0
 
-    async def run(self,*,target,system,memory='',topic='',automatic=False,dry_run=False,plan=None,observer=None):
+    async def run(self,*,target,system,memory='',topic='',automatic=False,dry_run=False,plan=None,observer=None,transcribe=None):
+        # `transcribe` is per-call so a background round can grant speech recognition
+        # without mutating the browser; it never grants a like or a share by itself.
+        if transcribe is not None:self.transcribe=transcribe
         if self.lock.locked():return {'status':'busy','read':0,'sent':0,'liked':0}
         async with self.lock:
             rid=None if dry_run else self.store.begin_round(automatic,min(16,max(1,int(self.cfg.get('daily_rounds',3)))))

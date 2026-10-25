@@ -4,7 +4,7 @@
   "auto_like":{"description":"允许自主点赞（新安装默认关闭；只赞实际读了字幕且喜欢的内容，不取消已有赞）","type":"bool","default":false},
   "daily_likes":{"description":"每日最多点赞占额；不明确结果也占额防重试（硬上限10）","type":"int","default":3},
   "daily_shares":{"description":"每日QQ分享上限（硬上限3），不是必推条数","type":"int","default":2},
-  "daily_rounds":{"description":"每日活动轮次上限（手动自动共用，硬上限16），分享额度用完仍可自己浏览","type":"int","default":8},
+  "daily_rounds":{"description":"每日活动轮次上限（手动自动共用，硬上限16），分享额度用完仍可自己浏览","type":"int","default":10},
   "videos_per_round":{"description":"每次活动最多读取候选数量（硬上限5），可以只浏览/点赞而不分享","type":"int","default":3},
   "share_cooldown_minutes":{"description":"自主分享最短间隔（分钟，最少30）；避免刚发一条又来找你","type":"int","default":120},
   "quiet_start":{"description":"QQ免打扰开始小时UTC+8；期间仍可以浏览点赞，推荐暂存最多24小时","type":"int","default":23},

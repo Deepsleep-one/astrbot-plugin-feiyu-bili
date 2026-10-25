@@ -73,6 +73,27 @@ class AutonomyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(resolved.name), 32)
         shutil.rmtree(resolved)
 
+    async def test_run_accepts_a_transcribe_callback_without_mutating_like_gates(self):
+        """Regression: the plugin passes transcribe= into run(); an unknown kwarg killed
+        every automatic round with TypeError while the browser was a Mock in tests."""
+        self.client.subtitle = AsyncMock(return_value={"text": "", "reason": "empty_subtitle"})
+        seen = []
+
+        async def cb(bvid, item, automatic, reason):
+            seen.append((bvid, automatic, reason))
+            return {"ok": True, "text": "机器听写的内容", "like_ok": False, "block": "机器转写",
+                    "segments": [], "quality": {"like_ok": False, "reasons": ["too_little_text"]}}
+
+        result = await self.browser.run(target=TARGET, system="人格", memory="", topic="离线",
+                                       automatic=True, transcribe=cb)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][2], "empty_subtitle")
+        self.assertEqual(result["asr_used"], 1)
+        # 转写给了文字，但 like_ok=False：既不能点赞，也不能因此分享。
+        self.assertEqual(result["liked"], 0)
+        self.assertEqual(self.client.like.await_count, 0)
+
     def rows(self, table):
         self.assertIn(table, ("settings", "videos", "deliveries", "rounds", "likes", "suggestions"))
         return [dict(row) for row in self.store.db.execute("SELECT * FROM " + table)]

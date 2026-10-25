@@ -7,6 +7,7 @@ memory facade exposes reads only: any attempted memory mutation fails the test.
 from __future__ import annotations
 
 import asyncio
+import json
 import importlib.util
 import shutil
 import sys
@@ -452,7 +453,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleep.await_count, 2)
         sleep.assert_awaited_with(60)
 
-    async def test_automatic_loop_error_disables_auto_without_echoing_exception(self):
+    async def test_automatic_loop_error_backs_off_without_echoing_exception(self):
         self.store.set("auto", True)
         self.instance._tick = AsyncMock(side_effect=RuntimeError("private-token"))
         with patch.object(plugin.asyncio, "sleep", new_callable=AsyncMock,
@@ -460,9 +461,13 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(plugin.logger, "warning") as warning:
             with self.assertRaises(asyncio.CancelledError):
                 await self.instance._loop()
-        self.assertIs(self.store.get("auto"), False)
+        # 一次瞬时错误只退避：不会把当日自主活动直接关死。
+        self.assertIs(self.store.get("auto"), True)
+        self.assertTrue(self.store.get("next_wake"))
         self.assertNotIn("private-token", str(warning.call_args))
         self.assertEqual(warning.call_args.args[-1], "RuntimeError")
+        # 原文留在库里给主人看，日志里只出现异常类型。
+        self.assertIn("private-token", json.loads(self.store.get("last_error"))["message"])
 
     async def test_tick_delays_first_wake_and_flushes_before_round_quota(self):
         self.bind()

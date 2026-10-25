@@ -83,7 +83,7 @@ HELP='''/刷站 读 BV号或链接 [p2] — 真读这一P的字幕，分段进�
 指定视频的阅读只在主人私聊、由主人给出BV时发生；没字幕就说没字幕，没抽到画面就说没画面。
 自主选题只到「提议」为止：我把想读的列出来，主人点头（/刷站 读 编号）才去读，绝不自己先读、先花模型钱。'''
 
-@register('astrbot_plugin_feiyu_bili','大肥鱼项目','自主逛B站、独立点赞决策、遇到值得分享的再私聊；指定视频可真空阅读（字幕、抽帧看画面、写手账、读评论含置顶与楼中楼、读弹幕抽样、没字幕时本机转写）','0.8.0')
+@register('astrbot_plugin_feiyu_bili','大肥鱼项目','自主逛B站、独立点赞决策、遇到值得分享的再私聊；指定视频可真空阅读（字幕、抽帧看画面、写手账、读评论含置顶与楼中楼、读弹幕抽样、没字幕时本机转写）','0.8.1')
 class FeiyuBiliPlugin(Star):
     def __init__(self,context:Context,config=None):
         super().__init__(context)
@@ -937,7 +937,7 @@ class FeiyuBiliPlugin(Star):
                 stamp=path.stat().st_mtime_ns
                 if stamp!=self._credential_stamp:self.client.reload_credentials(path);self._credential_stamp=stamp
             binding,system,mem=await self._bundle()
-            if not dry_run and self.store.round_count()>=min(16,max(1,int(self.config.get('daily_rounds',8)))):
+            if not dry_run and self.store.round_count()>=min(16,max(1,int(self.config.get('daily_rounds',10)))):
                 return {'status':'round_limit','read':0,'sent':0,'liked':0}
             plan=None
             if not topic:
@@ -971,7 +971,7 @@ class FeiyuBiliPlugin(Star):
         binding,_,_,_=self._verified_binding()
         await self.browser.flush_pending(binding['umo'])
         # Sharing quota never stops browsing or liking. Daily round quota remains a hard cost limit.
-        if self.store.round_count()>=min(16,max(1,int(self.config.get('daily_rounds',8)))):return
+        if self.store.round_count()>=min(16,max(1,int(self.config.get('daily_rounds',10)))):return
         due=self.store.get('next_wake')
         if not due:
             # Initial delayed wake, not a fixed push slot.
@@ -981,13 +981,46 @@ class FeiyuBiliPlugin(Star):
         logger.info('[feiyu-bili] 自主活动 status=%s read=%s liked=%s sent=%s',result['status'],result['read'],result.get('liked',0),result['sent'])
 
     async def _loop(self):
+        failures=0
         while True:
             await asyncio.sleep(60)
-            try:await self._tick()
+            try:
+                await self._tick()
+                failures=0
             except asyncio.CancelledError:raise
             except Exception as exc:
-                logger.warning('[feiyu-bili] 自主活动暂停（%s），请 /刷站 状态 检查。',type(exc).__name__)
-                self.store.set('auto',False)
+                failures+=1
+                self._after_failure(exc,failures)
+
+    def _after_failure(self,exc,failures):
+        # One transient error (persona not loaded yet, a network blip) must not end
+        # autonomy for the rest of the day: the first two attempts only back off,
+        # the third consecutive one pauses and says why.
+        logger.warning('[feiyu-bili] 自主活动失败第%d次（%s），30 分钟后再试；详情见 /刷站 状态。',
+                       failures,type(exc).__name__)
+        logger.debug('[feiyu-bili] 自主活动异常详情',exc_info=True)
+        self._record_autonomy_error(exc)
+        if failures>=3:
+            logger.error('[feiyu-bili] 连续 3 次失败，自主活动已暂停；修好后 /刷站 开启。')
+            self.store.set('auto',False)
+        else:
+            self.store.set('next_wake',next_wake(30))
+        return failures
+
+    def _last_autonomy_error(self):
+        raw=self.store.get('last_error')
+        if not raw:return {}
+        try:
+            parsed=json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed,dict) else {}
+
+    def _record_autonomy_error(self,exc):
+        try:
+            self.store.set('last_error',json.dumps({'at':now().isoformat(),'type':type(exc).__name__,
+                'message':str(exc)[:300]},ensure_ascii=False))
+        except Exception:pass
 
     @filter.llm_tool(name='feiyu_browse_bilibili')
     async def explore_tool(self,event:AstrMessageEvent,topic:str='') -> str:
@@ -1191,7 +1224,10 @@ class FeiyuBiliPlugin(Star):
                 where=('本机'+self._asr_endpoint() if self._asr_endpoint() else '本地 worker')
                 engine=(('可用（'+where+'）') if self._asr_probe and self._asr_probe.get('available')
                         else ('不可用（'+where+'）' if self._asr_probe else '未探测（首次转写时才问）'))
-                yield event.plain_result(f"自主活动：{'开' if self.store.get('auto',False) else '关'}；点赞：{'开' if self._likes_enabled() else '关'}；会话：{'已绑定' if self.store.get('binding') else '未绑定'}\n今日浏览轮次{self.store.round_count()}，点赞占额{self.store.daily_likes()}，分享占额{self.store.daily_count()}。凭证：{'已配置，实际有效性按请求核验' if creds else '未配置'}\n指定视频阅读：{'可用（能抽帧看画面）' if decoder else '只能读字幕，缺 ffmpeg 无法抽帧'}；手账待核对{pending}条，认识{knows}条\n评论：{'可读第一页'+str(comments_n)+'条（只读，观众说法）' if comments_on else '已关闭'}\n弹幕：{'可抽样'+str(danmaku_n)+'条（只读，带时间、无作者）' if danmaku_on else '已关闭'}\n转写：{'可用｜引擎'+engine+'｜今日已用'+str(asr_used)+'/'+str(asr_n)+'次（只在不给主人瞎编时兜底，不自动跨端）' if asr_on else '已关闭'}\n后台视觉：{'开（每轮最多升级1条）' if auto_vision else '关（只记下本来会看哪一条，不下载、不花模型钱）'}；筛选记录{shadows}条，其中待升级{would}条\n兴趣{interest}条；我提的{wants}条还等你点头，不点头我不读。\n活动由首页/相关推荐/新兴趣探索驱动，不按固定推送时刻。\n下次唤醒参考：{self.store.get('next_wake','尚未安排')}");return
+                err=self._last_autonomy_error()
+                fail_line=(f"\n最近一次自主活动失败：{err.get('at','')[11:16]} {err.get('type','')}: {err.get('message','')[:120]}"
+                           if err else '')
+                yield event.plain_result(f"自主活动：{'开' if self.store.get('auto',False) else '关'}；点赞：{'开' if self._likes_enabled() else '关'}；会话：{'已绑定' if self.store.get('binding') else '未绑定'}\n今日浏览轮次{self.store.round_count()}，点赞占额{self.store.daily_likes()}，分享占额{self.store.daily_count()}。凭证：{'已配置，实际有效性按请求核验' if creds else '未配置'}\n指定视频阅读：{'可用（能抽帧看画面）' if decoder else '只能读字幕，缺 ffmpeg 无法抽帧'}；手账待核对{pending}条，认识{knows}条\n评论：{'可读第一页'+str(comments_n)+'条（只读，观众说法）' if comments_on else '已关闭'}\n弹幕：{'可抽样'+str(danmaku_n)+'条（只读，带时间、无作者）' if danmaku_on else '已关闭'}\n转写：{'可用｜引擎'+engine+'｜今日已用'+str(asr_used)+'/'+str(asr_n)+'次（只在不给主人瞎编时兜底，不自动跨端）' if asr_on else '已关闭'}\n后台视觉：{'开（每轮最多升级1条）' if auto_vision else '关（只记下本来会看哪一条，不下载、不花模型钱）'}；筛选记录{shadows}条，其中待升级{would}条\n兴趣{interest}条；我提的{wants}条还等你点头，不点头我不读。\n活动由首页/相关推荐/新兴趣探索驱动，不按固定推送时刻。\n下次唤醒参考：{self.store.get('next_wake','尚未安排')}{fail_line}");return
             if action in ('任务','工作台'):
                 scope=self._scope(event)
                 vision=('开（每轮最多升级1条，媒体并发1）' if bool(self.config.get('auto_vision',True))

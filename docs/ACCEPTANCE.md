@@ -141,6 +141,15 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py    
 
 结果：**391 项全部 OK**（2026-10-25，v0.8.0；含 4 个选档预算测试、5 个「模型不支持看图」测试、2 个 vision_provider_id 测试、19 个 M5 筛选/工作台测试、10 个评论测试、9 个弹幕测试、44 个 ASR 纯逻辑测试、21 个 ASR 插件级测试、7 个远程执行端测试与 48 个客户端契约测试）。
 
+## A89–A92：v0.8.1 自主活动可靠性
+
+| 编号 | 协议 | 离线下怎么证明 |
+|---|---|---|
+| A89 | 每日轮次上限默认 10，第 10 轮后不再跑 | `test_daily_round_cap_is_ten_by_default`（9 轮仍跑、第 10 轮后不跑） |
+| A90 | 一次瞬时错误只退避、不关停；连续 3 次才暂停并记原因 | `test_first_failure_backs_off_instead_of_stopping`、`test_third_consecutive_failure_pauses_and_keeps_reason`、`test_automatic_loop_error_backs_off_without_echoing_exception` |
+| A91 | 异常原文只进库、不进日志（日志只有类型） | 同上：`assertNotIn("private-token", warning)` 且 `last_error.message` 含原文 |
+| A92 | `Browser.run` 接受 per-call `transcribe`，且转写不能买点赞/分享 | `test_run_accepts_a_transcribe_callback_without_mutating_like_gates` |
+
 ## B. 真实证据
 
 2026-10-25 本机联网跑过一次（脚本 `_tools\live_accept.py`，产物 `_tools\live_accept.json`、`_tools\live\shown\frame_*.jpg`）；同日 17:37 生产部署后又在容器内跑了一次（`_tools\prod_e2e.py`，临时库、不碰生产 `browse.db`）：真实字幕 202 段、下载 28,045,001B、4 帧、`visual_observed`。

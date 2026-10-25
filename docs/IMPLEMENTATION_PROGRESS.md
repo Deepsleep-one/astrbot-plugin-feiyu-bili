@@ -209,6 +209,18 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py
 | 中文清晰/噪声/专名/数字/否定句的实际识别质量 | 测试里用的是假 worker 的固定文本，只验证契约，不验证识别质量 |
 | 与 AstrBot 同机时对 QQ 响应的实际影响 | 云端 small 已证明会 OOM，因此执行端放本机；本机转写对聊天的影响仍需部署后观察 |
 
+15. ~~**v0.8.1：每日 10 轮 + 出错不再停摆**~~ → **已上线（2026-10-25 21:15 实测通过）**：
+
+    - 主人要求「每天十轮」：`daily_rounds` 默认 8 → **10**（硬上限仍 16），代码两处默认值与 `_conf_schema.json`、生产配置同步改。
+    - 顺手查出并修掉一个真 bug：`main._run` 把 `transcribe=` 传给 `Browser.run()`，而 `Browser` 只在构造时接受它 →
+      `TypeError: Browser.run() got an unexpected keyword argument 'transcribe'`，**每一次后台自主轮次都会失败**。
+      离线测试没抓到，是因为那些用例把 `browser` 换成了 Mock（Mock 接受任意关键字）。修法：`Browser.run` 接受 per-call `transcribe`。
+      新增回归 `test_run_accepts_a_transcribe_callback_without_mutating_like_gates`（真实 Browser + 假字幕空 → 回调被调用、`liked=0`）。
+    - 自主循环不再「一次错误就关一整天」：失败先退避 30 分钟，**连续 3 次**才把 `auto` 关掉；异常原文写进 `settings.last_error`，
+      `/刷站 状态` 末行显示「最近一次自主活动失败：HH:MM TypeError: …」，日志只打异常类型（不把任意文本写进日志）。
+    - 结果：`/刷站 状态` 会同时显示今日轮次（10 上限）与最近一次失败原因；线上实测 21:14:43 一轮 `status=ok read=3 liked=0 sent=0`，
+      并伴随 `后台视觉 state=visual_observed frames=4`（真的抽了 4 帧看过）。
+
 ## 6. 未完成 / 需要主人批准
 
 1. ~~生产环境装 ffmpeg~~ → **不需要装**：容器自带 ffmpeg 7.1.5 + ffprobe（`decoder=True`）。
