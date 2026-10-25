@@ -246,10 +246,28 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             Response({"body": [{"content": "你好"}, {"content": "世界"}]}))
         client._cookies = {"SESSDATA": "private-secret"}
         result = await client.subtitle(BV)
-        self.assertEqual(result, {"text": "你好\n世界", "source": "bilibili_subtitle:first_part", "reason": "ok"})
+        self.assertEqual(result["text"], "你好\n世界")
+        self.assertEqual(result["source"], "bilibili_subtitle:part")
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(result["lang"], "ai-zh")
+        self.assertEqual(result["chars"], len("你好\n世界"))
+        # the payload carried no from/to, so no timeline may be invented
+        self.assertEqual(result["segments"], [])
         self.assertIsNone(client._session.calls[-1][1]["cookies"])
         self.assertNotIn("private", str(result))
         self.assertTrue(all(c[0].startswith("https://") for c in client._session.calls))
+
+    async def test_subtitle_keeps_real_timeline_and_drops_bad_times(self):
+        client = self.client(Response(nav()), api({"subtitle": {"subtitles": [
+            {"lan": "ai-zh", "subtitle_url": "https://aisubtitle.hdslb.com/a"}]}}),
+            Response({"body": [{"from": 0.5, "to": 2.0, "content": "第一句"},
+                               {"from": 2.0, "to": 4.25, "content": "第二句"},
+                               {"from": 9, "to": 1, "content": "坏时间"}]}))
+        result = await client.subtitle(BV, cid=1)
+        self.assertEqual([(row["from_ms"], row["to_ms"]) for row in result["segments"]],
+                         [(500, 2000), (2000, 4250)])
+        self.assertEqual(result["segments"][0]["text"], "第一句")
+        self.assertEqual(len(client._session.calls), 3)
 
     async def test_subtitle_no_cid(self):
         client = self.client(api({}))
@@ -261,7 +279,10 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                                ({"need_login_subtitle": True}, "login_required")]:
             with self.subTest(reason=reason):
                 client = self.client(api({"cid": 1}), Response(nav()), api(player))
-                self.assertEqual(await client.subtitle(BV), {"text": "", "source": "none", "reason": reason})
+                result = await client.subtitle(BV)
+                self.assertEqual((result["text"], result["source"], result["reason"]),
+                                 ("", "none", reason))
+                self.assertEqual(result["segments"], [])
 
     async def test_subtitle_empty_and_truncation(self):
         for body, expected in [([{"content": " "}], ("", "empty_subtitle")),
@@ -285,7 +306,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 client = self.client(api({"cid": 1}), Response(nav()),
                                      api({"subtitle": {"subtitles": [{"subtitle_url": url}]}}))
                 result = await client.subtitle(BV)
-                self.assertEqual(result, {"text": "", "source": "none", "reason": "unsafe_url"})
+                self.assertEqual((result["text"], result["source"], result["reason"]),
+                                 ("", "none", "unsafe_url"))
                 self.assertEqual(len(client._session.calls), 3)
 
     async def test_transport_redirect_never_followed(self):
@@ -295,6 +317,133 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.reason, "redirect")
         self.assertEqual(len(client._session.calls), 1)
         self.assertFalse(client._session.calls[0][1]["allow_redirects"])
+
+    async def test_replies_are_read_only_sanitized_and_capped(self):
+        view = api({"aid": 42, "title": "t", "owner": {"name": "UP", "mid": 7},
+                    "pages": [{"page": 1, "cid": 5}]})
+        payload = api({"upper": {"mid": 7}, "replies": [
+            {"floor": 1, "like": 3, "member": {"mid": 7},
+             "content": {"message": "<b>讲得好</b> 详见 https://evil.invalid/x  谢谢"}},
+            {"floor": 2, "like": 0, "member": {"mid": 9}, "content": {"message": "   "}},
+            {"floor": 3, "like": 1, "member": {"mid": 9}, "content": {"message": "第一"}}]})
+        client = self.client(view, payload)
+        result = await client.replies(BV, limit=8)
+        self.assertEqual(result["source"], "bilibili_replies")
+        self.assertEqual(result["reason"], "")
+        rows = result["items"]
+        self.assertEqual([row["text"] for row in rows], ["讲得好 详见 谢谢", "第一"])
+        self.assertEqual([row["is_up"] for row in rows], [True, False])
+        self.assertEqual([row["likes"] for row in rows], [3, 1])
+        self.assertNotIn("evil", str(result))
+        self.assertNotIn("mid", str(result))
+        calls = client._session.calls
+        self.assertEqual(calls[-1][1]["params"]["oid"], 42)
+        self.assertEqual(calls[-1][1]["params"]["type"], 1)
+        self.assertFalse(calls[-1][1]["cookies"])
+        self.assertEqual(client._session.posts, [])
+
+    async def test_replies_match_uploader_when_ids_are_strings(self):
+        # 真实接口形状（2026-10-25 联网核验）：floor 为 null，评论者 mid 在 row.mid（int），
+        # 而 member.mid 是字符串 —— 只比 member.mid 会永远判不出 UP 主本人。
+        payload = api({"upper": {"mid": 7}, "replies": [
+            {"floor": None, "like": 12, "mid": 7, "member": {"mid": "7"}, "content": {"message": "UP 自己回"}},
+            {"floor": None, "like": 1, "mid": 9, "member": {"mid": "9"}, "content": {"message": "路人"}},
+            {"mid": "7", "member": {}, "content": {"message": "只有 mid_str 也算本人"}}]})
+        client = self.client(api({"aid": 42, "owner": {"name": "UP"}}), payload)
+        items = (await client.replies(BV, limit=8))["items"]
+        self.assertEqual([row["is_up"] for row in items], [True, False, True])
+        self.assertEqual([row["floor"] for row in items], [0, 0, 0])
+        self.assertEqual([row["likes"] for row in items], [12, 1, 0])
+
+    async def test_replies_include_pinned_comment_and_nested_uploader_answer(self):
+        payload = api({"upper": {"mid": 7, "top": {
+                          "rpid": 900, "like": 40, "mid": 7, "member": {"mid": "7"},
+                          "content": {"message": "勘误：第三分钟的数字应为 12"}}},
+                      "replies": [
+                          {"rpid": 1, "like": 5, "mid": 9, "member": {"mid": "9"},
+                           "content": {"message": "路人问细节"},
+                           "replies": [
+                               {"rpid": 11, "like": 2, "mid": 7, "member": {"mid": "7"},
+                                "content": {"message": "作者答：用的是旧数据"}},
+                               {"rpid": 12, "like": 0, "mid": 8, "member": {"mid": "8"},
+                                "content": {"message": "别人插话"}}]},
+                          {"rpid": 2, "like": 1, "mid": 9, "member": {"mid": "9"},
+                           "content": {"message": "第二条"}}]})
+        client = self.client(api({"aid": 42, "owner": {"name": "UP"}}), payload)
+        result = await client.replies(BV, limit=8)
+        items = result["items"]
+        self.assertEqual(items[0]["text"], "勘误：第三分钟的数字应为 12")
+        self.assertTrue(items[0]["pinned"])
+        self.assertTrue(items[0]["is_up"])
+        self.assertEqual(result["nested_up"], 1)
+        nested = [row for row in items if row["nested"]]
+        self.assertEqual([row["text"] for row in nested], ["作者答：用的是旧数据"])
+        self.assertTrue(nested[0]["is_up"])
+        self.assertNotIn("别人插话", [row["text"] for row in items])
+        self.assertEqual(len(client._session.calls), 2)  # detail + 一页评论，没有额外抓取
+        self.assertEqual(client._session.posts, [])
+        self.assertNotIn("mid", str(result))
+
+    async def test_replies_cap_nested_uploader_answers_at_three(self):
+        children = [{"rpid": 100 + i, "mid": 7, "member": {"mid": "7"},
+                     "content": {"message": f"作者第{i}答"}} for i in range(5)]
+        payload = api({"upper": {"mid": 7, "top": None}, "replies": [
+            {"rpid": 1, "mid": 9, "member": {"mid": "9"},
+             "content": {"message": "一层"}, "replies": children}]})
+        client = self.client(api({"aid": 42, "owner": {"name": "UP"}}), payload)
+        result = await client.replies(BV, limit=20)
+        self.assertEqual(result["nested_up"], 3)
+        self.assertEqual(len(result["items"]), 4)
+        self.assertEqual([row["text"] for row in result["items"]][1:],
+                         ["作者第0答", "作者第1答", "作者第2答"])
+
+    async def test_replies_follows_a_thread_to_find_the_uploader_answer(self):
+        payload = api({"upper": {"mid": 7, "top": None}, "replies": [
+            {"rpid": 31, "like": 4, "mid": 9, "member": {"mid": "9"}, "rcount": 5,
+             "content": {"message": "问个细节"}, "replies": []}]})
+        thread = api({"replies": [
+            {"rpid": 77, "mid": 7, "member": {"mid": "7"},
+             "content": {"message": "作者在楼中楼答：用的是旧数据"}},
+            {"rpid": 78, "mid": 8, "member": {"mid": "8"},
+             "content": {"message": "路人插话"}}]})
+        client = self.client(api({"aid": 42, "owner": {"name": "UP"}}), payload, thread)
+        result = await client.replies(BV, limit=8)
+        self.assertEqual(result["nested_up"], 1)
+        nested = [row for row in result["items"] if row["nested"]]
+        self.assertEqual([row["text"] for row in nested], ["作者在楼中楼答：用的是旧数据"])
+        self.assertTrue(nested[0]["is_up"])
+        self.assertNotIn("路人插话", [row["text"] for row in result["items"]])
+        calls = client._session.calls
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1][0], module._API + "/x/v2/reply/reply")
+        self.assertEqual(calls[-1][1]["params"]["root"], 31)
+        self.assertEqual(calls[-1][1]["params"]["ps"], module.NESTED_PS)
+        self.assertEqual(client._session.posts, [])
+
+    async def test_replies_follows_at_most_two_threads(self):
+        rows = [{"rpid": 50 + i, "mid": 9, "member": {"mid": "9"}, "rcount": 3,
+                 "content": {"message": f"问题{i}"}, "replies": []} for i in range(4)]
+        payload = api({"upper": {"mid": 7, "top": None}, "replies": rows})
+        empty = api({"replies": []})
+        client = self.client(api({"aid": 42, "owner": {"name": "UP"}}), payload,
+                             empty, empty, empty, empty)
+        result = await client.replies(BV, limit=20)
+        self.assertEqual(result["nested_up"], 0)
+        thread_calls = [call for call in client._session.calls
+                        if call[0].endswith("/x/v2/reply/reply")]
+        self.assertEqual(len(thread_calls), module.NESTED_THREADS)
+        self.assertEqual([call[1]["params"]["root"] for call in thread_calls], [50, 51])
+
+    async def test_replies_without_aid_or_hit_by_risk_control(self):
+        client = self.client(api({"title": "t", "owner": {"name": "UP"}}))
+        result = await client.replies(BV)
+        self.assertEqual((result["items"], result["reason"]), ([], "no_aid"))
+        self.assertEqual(len(client._session.calls), 1)
+        client = self.client(api({"aid": 42, "owner": {"name": "UP"}}),
+                             Response({"code": -352, "message": "secret-cookie"}))
+        result = await client.replies(BV)
+        self.assertEqual((result["items"], result["reason"]), ([], "risk_control"))
+        self.assertNotIn("secret", str(result))
 
     async def test_api_and_http_risk_control(self):
         for response in [Response(status=n) for n in (403, 412, 429)] + [
@@ -314,7 +463,10 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_subtitle_risk_is_not_no_subtitle(self):
         client = self.client(Response(status=412))
-        self.assertEqual(await client.subtitle(BV), {"text": "", "source": "none", "reason": "risk_control"})
+        result = await client.subtitle(BV)
+        self.assertEqual((result["text"], result["source"], result["reason"]),
+                         ("", "none", "risk_control"))
+        self.assertEqual(result["segments"], [])
 
     async def test_streaming_and_declared_size_limits(self):
         for response in [Response({}, length=2048), Response(chunks=[b"x" * 800, b"x" * 800])]:
@@ -393,6 +545,114 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 await client._json(url)
             self.assertEqual(caught.exception.reason, "unsafe_url")
         self.assertEqual(client._session.calls, [])
+
+
+DANMAKU_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?><i>'
+    '<d p="0.5,1,25,16777215,0,0,0,0">前方高能</d>'
+    '<d p="1.0,1,25,16777215,0,0,0,0">前方高能</d>'
+    '<d p="2.0,1,25,16777215,0,0,0,0">前面详见 https://evil.invalid/x</d>'
+    '<d p="5.0,1,25,16777215,0,0,0,0">第二条</d>'
+    '<d p="8.0,1,25,16777215,0,0,0,0">第三条不该进来</d>'
+    '<d p="40.0,1,25,16777215,0,0,0,0">中段一</d>'
+    '<d p="41.0,1,25,16777215,0,0,0,0">中段二</d>'
+    '<d p="42.0,1,25,16777215,0,0,0,0">中段三</d>'
+    '<d p="70.0,1,25,16777215,0,0,0,0">结尾</d>'
+    '<d p="bad,1,25">坏时间</d>'
+    '<d p="-5,1,25">负时间</d>'
+    '<d p="3.0,1,25"> </d>'
+    '</i>')
+
+
+class DanmakuTests(unittest.IsolatedAsyncioTestCase):
+    def client(self, *responses, **kwargs):
+        client = BiliClient(**kwargs)
+        client._session = Session(responses)
+        self.addAsyncCleanup(client.close)
+        return client
+
+    def raw(self, text):
+        body = text.encode("utf-8")
+        return Response(chunks=[body], length=len(body))
+
+    async def test_danmaku_is_read_only_sampled_by_time_and_sanitized(self):
+        client = self.client(self.raw(DANMAKU_XML))
+        result = await client.danmaku(BV, 101, limit=10)
+        self.assertEqual(result["source"], "bilibili_danmaku")
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(result["cid"], 101)
+        texts = [row["text"] for row in result["items"]]
+        self.assertEqual(texts[0], "前方高能")
+        self.assertEqual(result["items"][0]["count"], 2)
+        self.assertNotIn("evil.invalid", str(result))
+        self.assertNotIn("坏时间", texts)
+        self.assertNotIn("负时间", texts)
+        stamps = [row["at_ms"] for row in result["items"]]
+        self.assertEqual(stamps, sorted(stamps))
+        # 抽样要跨时间桶，不能只是开头那几条
+        self.assertGreaterEqual(len({ms // 30000 for ms in stamps}), 3)
+        self.assertLessEqual(len(result["items"]), 10)
+        self.assertEqual(result["total"], 9)
+        calls = client._session.calls
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "https://comment.bilibili.com/101.xml")
+        self.assertIsNone(calls[0][1]["cookies"])
+        self.assertFalse(calls[0][1]["allow_redirects"])
+        self.assertEqual(client._session.posts, [])
+
+    async def test_danmaku_limit_and_per_bucket_cap(self):
+        client = self.client(self.raw(DANMAKU_XML))
+        self.assertEqual((await client.danmaku(BV, 101, limit=2))["sampled"], 2)
+        client = self.client(self.raw(DANMAKU_XML))
+        rows = (await client.danmaku(BV, 101, limit=50))["items"]
+        # 第一个 30 秒桶里虽然有 5 条不同的话，最多只留 2 条
+        self.assertEqual(len([row for row in rows if row["at_ms"] < 30000]), 2)
+
+    async def test_danmaku_refuses_doctype_and_entity_bodies(self):
+        for body in ('<?xml version="1.0"?><!DOCTYPE i [<!ENTITY x "y">]><i><d p="1">骂人</d></i>',
+                     '<i><d p="1">骂人</d><!ENTITY x "y"></i>'):
+            client = self.client(self.raw(body))
+            result = await client.danmaku(BV, 101, limit=5)
+            self.assertEqual(result["reason"], "empty")
+            self.assertEqual(result["items"], [])
+
+    async def test_danmaku_reports_closed_when_bilibili_says_the_feature_is_off(self):
+        # 真实形状（2026-10-25 实测不存在的 cid）：200 + 合法 <i> + <text_side> 说明
+        closed = ('<?xml version="1.0" encoding="UTF-8"?><i><chatserver>chat.bilibili.com</chatserver>'
+                  '<chatid>999999999</chatid><mission>0</mission><maxlimit>1</maxlimit>'
+                  '<text_side>本视频弹幕功能已被关闭</text_side></i>')
+        client = self.client(self.raw(closed))
+        result = await client.danmaku(BV, 999999999, limit=5)
+        self.assertEqual(result["reason"], "closed")
+        self.assertEqual(result["items"], [])
+
+        quiet = '<?xml version="1.0"?><i><chatid>1</chatid></i>'
+        client = self.client(self.raw(quiet))
+        self.assertEqual((await client.danmaku(BV, 1, limit=5))["reason"], "empty")
+
+    async def test_danmaku_bad_cid_and_transport_failures(self):
+        client = self.client()
+        result = await client.danmaku(BV, 0)
+        self.assertEqual(result["reason"], "missing_cid")
+        self.assertEqual(client._session.calls, [])
+
+        client = self.client(Response(status=412))
+        self.assertEqual((await client.danmaku(BV, 101))["reason"], "risk_control")
+        client = self.client(Response(status=404))
+        self.assertEqual((await client.danmaku(BV, 101))["reason"], "not_found")
+        client = self.client(Response(chunks=[b"x"], length=10 ** 9))
+        self.assertEqual((await client.danmaku(BV, 101))["reason"], "response_too_large")
+        client = self.client(asyncio.TimeoutError())
+        self.assertEqual((await client.danmaku(BV, 101))["reason"], "timeout")
+
+    async def test_danmaku_falls_back_to_detail_for_cid(self):
+        client = self.client(api({"cid": 55, "title": "t", "pages": [{"page": 1, "cid": 55}]}),
+                             self.raw('<i><d p="1.5,1,25">来了</d></i>'))
+        result = await client.danmaku(BV, limit=5)
+        self.assertEqual(result["cid"], 55)
+        self.assertEqual([row["text"] for row in result["items"]], ["来了"])
+        self.assertTrue(client._session.calls[0][0].endswith("/x/web-interface/view"))
+        self.assertEqual(client._session.calls[0][1]["cookies"], {})
 
 
 class CredentialsTests(unittest.TestCase):

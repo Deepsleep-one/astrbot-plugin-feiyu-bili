@@ -8,6 +8,13 @@ __pycache__/
 .venv/
 bili_credential.json
 *credential*.json
+*_token.txt
 tests/.runs/
 tests/tmp*/
+tests/_tmp_*/
 plugin/**/tests/tmp*/
+plugin/**/tests/_tmp_*/
+_tools/
+media/
+*.m4s
+*.wav

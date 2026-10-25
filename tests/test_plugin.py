@@ -139,6 +139,9 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*set(self.tasks), return_exceptions=True)
         # Fail if the integration attempted any operation except these reads.
         self.assertTrue(all(c[0] in {"get_owner", "build_context"} for c in self.db.mock_calls))
+        if getattr(self.instance, "rstore", None) is not None:
+            self.instance.rstore.close()
+            self.instance.rstore = None
         self.store.close()
         resolved = self.run_path.resolve()
         self.assertEqual(resolved.parent, self.run_root.resolve())
