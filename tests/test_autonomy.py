@@ -276,6 +276,7 @@ class AutonomyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows("deliveries"), [])
 
     async def test_flush_respects_quota_cooldown_and_one_item_per_tick(self):
+        self.browser.cfg.update({"quiet_start": 0, "quiet_end": 0})
         self.store.offer(BVS[0], TARGET, "first")
         self.clock.return_value = MOMENT + timedelta(seconds=1)
         self.store.offer(BVS[1], TARGET, "second")
@@ -292,6 +293,7 @@ class AutonomyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sender.await_count, 2)
 
     async def test_flush_skips_already_attempted_bvid_instead_of_starving_queue(self):
+        self.browser.cfg.update({"quiet_start": 0, "quiet_end": 0})
         self.store.offer(BVS[0], TARGET, "new eligible")
         self.clock.return_value = MOMENT + timedelta(seconds=1)
         self.store.offer(BVS[1], TARGET, "duplicate pending")
@@ -411,6 +413,84 @@ class AutonomyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows("rounds")[0]["status"], "error")
         self.assertFalse(self.browser.lock.locked())
         self.sender.assert_not_awaited()
+
+
+
+class SharePacingTests(unittest.IsolatedAsyncioTestCase):
+    """Five shares a day, unlocked gradually instead of burst at breakfast."""
+
+    async def asyncSetUp(self):
+        self.root = Path(__file__).resolve().parent / ".runs"
+        self.path = self.root / uuid4().hex
+        self.path.mkdir(parents=True)
+        self.store = core.Store(self.path / "offline.db")
+        self.client = Mock(spec_set=["recommendations", "related", "search", "subtitle", "like"])
+        self.sender = AsyncMock(return_value=True)
+        self.browser = core.Browser(self.store, self.client, AsyncMock(), self.sender,
+                                    {"daily_shares": 5, "daily_rounds": 10,
+                                     "share_cooldown_minutes": 120,
+                                     "quiet_start": 23, "quiet_end": 9})
+        self.browser.can_send = lambda automatic: True
+        self._sent = 0
+
+    async def asyncTearDown(self):
+        self.store.close()
+        shutil.rmtree(self.path, ignore_errors=True)
+
+    def at(self, hour, minute=0):
+        return datetime(2026, 10, 25, hour, minute, tzinfo=core.TZ)
+
+    def deliver(self, hour, count=1, minute=0):
+        """Record `count` deliveries at that hour (as if they had really gone out)."""
+        for _ in range(count):
+            with patch.object(core, "now", return_value=self.at(hour, minute)):
+                did = self.store.reserve(video(self._sent), TARGET, "x", 5)
+                self.assertIsNotNone(did)
+                self.store.delivery_result(did, "sent")
+                self._sent += 1
+
+    def test_morning_allows_only_the_earned_slot(self):
+        with patch.object(core, "now", return_value=self.at(10)):
+            self.assertTrue(self.browser._send_window(True))
+        self.deliver(10)
+        with patch.object(core, "now", return_value=self.at(10, 30)):
+            self.assertFalse(self.browser._send_window(True))   # cooldown not the reason
+
+    def test_later_in_the_day_the_next_slot_unlocks(self):
+        self.deliver(10)
+        with patch.object(core, "now", return_value=self.at(12, 30)):
+            self.assertTrue(self.browser._send_window(True))     # 2nd slot earned, cooldown passed
+        self.deliver(12, minute=30)
+        with patch.object(core, "now", return_value=self.at(13)):
+            self.assertFalse(self.browser._send_window(True))    # 3rd slot not earned yet
+        with patch.object(core, "now", return_value=self.at(15, 30)):
+            self.assertTrue(self.browser._send_window(True))
+
+    def test_evening_all_five_can_go_out_but_not_six(self):
+        self.deliver(10); self.deliver(12, minute=30); self.deliver(15, minute=30); self.deliver(18, minute=30)
+        with patch.object(core, "now", return_value=self.at(21)):
+            self.assertTrue(self.browser._send_window(True))
+        self.deliver(21)
+        with patch.object(core, "now", return_value=self.at(22, 50)):
+            self.assertFalse(self.browser._send_window(True))
+
+    def test_quiet_hours_and_manual_paths(self):
+        with patch.object(core, "now", return_value=self.at(23, 30)):
+            self.assertFalse(self.browser._send_window(True))
+        with patch.object(core, "now", return_value=self.at(3)):
+            self.assertFalse(self.browser._send_window(True))
+        with patch.object(core, "now", return_value=self.at(23, 30)):
+            self.assertTrue(self.browser._send_window(False))     # 主人要求时不受静默限制
+
+    async def test_delivery_reservation_caps_at_five(self):
+        for index, hour in enumerate((10, 12, 15, 18, 21)):
+            with patch.object(core, "now", return_value=self.at(hour)):
+                status = await self.browser._deliver({"bvid": video(index)["bvid"]}, TARGET, "这个有意思。")
+                self.assertEqual(status, "sent")
+        with patch.object(core, "now", return_value=self.at(22)):
+            status = await self.browser._deliver({"bvid": video(6)["bvid"]}, TARGET, "这个有意思。")
+        self.assertEqual(status, "quota_or_duplicate")
+        self.assertEqual(self.store.daily_count(), 5)
 
 
 if __name__ == "__main__":

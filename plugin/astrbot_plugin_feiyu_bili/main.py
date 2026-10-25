@@ -13,7 +13,7 @@ from astrbot.core.star.filter.command import GreedyStr
 from . import asr
 from .core import Browser,Store,now,quiet,safe_text,DEFAULT_TOPICS
 from .bili_client import BiliClient
-from .exploration import plan_exploration,next_wake,scheduler_due
+from .exploration import active_minutes_left,align_to_window,plan_exploration,next_wake,scheduler_due,share_allowance,spread_rest
 from .reading import ReadingError,clock_now,new_id,open_reading,parse_target,pick_tier,plan_frames,render_page
 from .reading_store import JOURNAL_FIELDS,JOURNAL_LABELS,ReadingStore,SHADOW_LOOKED,SHADOW_LOOK_FAILED,SHADOW_SKIP,SHADOW_WOULD_LOOK
 from .media_worker import MediaWorker
@@ -83,7 +83,7 @@ HELP='''/刷站 读 BV号或链接 [p2] — 真读这一P的字幕，分段进�
 指定视频的阅读只在主人私聊、由主人给出BV时发生；没字幕就说没字幕，没抽到画面就说没画面。
 自主选题只到「提议」为止：我把想读的列出来，主人点头（/刷站 读 编号）才去读，绝不自己先读、先花模型钱。'''
 
-@register('astrbot_plugin_feiyu_bili','大肥鱼项目','自主逛B站、独立点赞决策、遇到值得分享的再私聊；指定视频可真空阅读（字幕、抽帧看画面、写手账、读评论含置顶与楼中楼、读弹幕抽样、没字幕时本机转写）','0.8.1')
+@register('astrbot_plugin_feiyu_bili','大肥鱼项目','自主逛B站、独立点赞决策、每天最多分享 5 条视频并摊到全天；指定视频可真空阅读（字幕、抽帧看画面、写手账、读评论含置顶与楼中楼、读弹幕抽样、没字幕时本机转写）','0.8.2')
 class FeiyuBiliPlugin(Star):
     def __init__(self,context:Context,config=None):
         super().__init__(context)
@@ -958,12 +958,30 @@ class FeiyuBiliPlugin(Star):
                 kwargs['transcribe']=self._transcribe_candidate
             result=await self.browser.run(**kwargs)
             if not dry_run:
-                rest=plan.get('rest_minutes',120) if plan else random.randint(75,180)
-                self.store.set('next_wake',next_wake(rest))
+                rest=self._round_rest(plan)
+                self._schedule(rest)
                 # Only after the round's like/share decisions are settled: pictures cannot buy actions.
                 if automatic and self.store.get('auto',False):await self._maybe_auto_look(binding['umo'])
             return result
         finally:self._active_jobs.discard(task)
+
+    def _schedule(self,rest):
+        # Queue the next round and keep it out of quiet hours: a round that cannot
+        # share would only eat the quota the day's five shares need.
+        wake=align_to_window(next_wake(rest),int(self.config.get('quiet_start',23)),int(self.config.get('quiet_end',9)))
+        self.store.set('next_wake',wake)
+        return wake
+
+    def _round_rest(self,plan=None):
+        # Spread the remaining rounds over the talkative time left, so the day's
+        # rounds (and therefore shares) are distributed instead of front-loaded.
+        # The planner may hurry but never skip ahead: `min` keeps the longer wait.
+        left=active_minutes_left(now(),int(self.config.get('quiet_start',23)),int(self.config.get('quiet_end',9)))
+        limit=min(16,max(1,int(self.config.get('daily_rounds',10))))
+        rounds=max(1,limit-self.store.round_count(now().date().isoformat()))
+        spread=spread_rest(left,rounds)
+        hint=plan.get('rest_minutes') if isinstance(plan,dict) else None
+        return min(spread,hint) if type(hint) is int and 30<=hint<=240 else spread
 
     async def _tick(self):
         self._purge_frames()
@@ -975,7 +993,7 @@ class FeiyuBiliPlugin(Star):
         due=self.store.get('next_wake')
         if not due:
             # Initial delayed wake, not a fixed push slot.
-            self.store.set('next_wake',next_wake(45));return
+            self._schedule(45);return
         if not scheduler_due(due,now()):return
         result=await self._run(automatic=True)
         logger.info('[feiyu-bili] 自主活动 status=%s read=%s liked=%s sent=%s',result['status'],result['read'],result.get('liked',0),result['sent'])
@@ -1004,7 +1022,7 @@ class FeiyuBiliPlugin(Star):
             logger.error('[feiyu-bili] 连续 3 次失败，自主活动已暂停；修好后 /刷站 开启。')
             self.store.set('auto',False)
         else:
-            self.store.set('next_wake',next_wake(30))
+            self._schedule(30)
         return failures
 
     def _last_autonomy_error(self):
@@ -1216,6 +1234,9 @@ class FeiyuBiliPlugin(Star):
                 comments_n=max(1,min(int(self.config.get('comments_limit',8) or 8),20))
                 danmaku_on=bool(self.config.get('danmaku_enabled',True))
                 danmaku_n=max(1,min(int(self.config.get('danmaku_limit',40) or 40),120))
+                share_daily=max(0,min(5,int(self.config.get('daily_shares',5))))
+                share_now=share_allowance(share_daily,now(),int(self.config.get('quiet_start',23)),int(self.config.get('quiet_end',9)))
+                share_rounds=min(16,max(1,int(self.config.get('daily_rounds',10))))
                 shadows=self.rstore.shadow_count(self._scope(event))
                 would=self.rstore.shadow_count(self._scope(event),SHADOW_WOULD_LOOK)
                 asr_on=bool(self.config.get('asr_enabled',True))
@@ -1227,7 +1248,7 @@ class FeiyuBiliPlugin(Star):
                 err=self._last_autonomy_error()
                 fail_line=(f"\n最近一次自主活动失败：{err.get('at','')[11:16]} {err.get('type','')}: {err.get('message','')[:120]}"
                            if err else '')
-                yield event.plain_result(f"自主活动：{'开' if self.store.get('auto',False) else '关'}；点赞：{'开' if self._likes_enabled() else '关'}；会话：{'已绑定' if self.store.get('binding') else '未绑定'}\n今日浏览轮次{self.store.round_count()}，点赞占额{self.store.daily_likes()}，分享占额{self.store.daily_count()}。凭证：{'已配置，实际有效性按请求核验' if creds else '未配置'}\n指定视频阅读：{'可用（能抽帧看画面）' if decoder else '只能读字幕，缺 ffmpeg 无法抽帧'}；手账待核对{pending}条，认识{knows}条\n评论：{'可读第一页'+str(comments_n)+'条（只读，观众说法）' if comments_on else '已关闭'}\n弹幕：{'可抽样'+str(danmaku_n)+'条（只读，带时间、无作者）' if danmaku_on else '已关闭'}\n转写：{'可用｜引擎'+engine+'｜今日已用'+str(asr_used)+'/'+str(asr_n)+'次（只在不给主人瞎编时兜底，不自动跨端）' if asr_on else '已关闭'}\n后台视觉：{'开（每轮最多升级1条）' if auto_vision else '关（只记下本来会看哪一条，不下载、不花模型钱）'}；筛选记录{shadows}条，其中待升级{would}条\n兴趣{interest}条；我提的{wants}条还等你点头，不点头我不读。\n活动由首页/相关推荐/新兴趣探索驱动，不按固定推送时刻。\n下次唤醒参考：{self.store.get('next_wake','尚未安排')}{fail_line}");return
+                yield event.plain_result(f"自主活动：{'开' if self.store.get('auto',False) else '关'}；点赞：{'开' if self._likes_enabled() else '关'}；会话：{'已绑定' if self.store.get('binding') else '未绑定'}\n今日浏览轮次{self.store.round_count()}/{share_rounds}，点赞占额{self.store.daily_likes()}，分享{self.store.daily_count()}/{share_daily}条（此刻按全天节奏已解锁{share_now}条；23–9点不发）。凭证：{'已配置，实际有效性按请求核验' if creds else '未配置'}\n指定视频阅读：{'可用（能抽帧看画面）' if decoder else '只能读字幕，缺 ffmpeg 无法抽帧'}；手账待核对{pending}条，认识{knows}条\n评论：{'可读第一页'+str(comments_n)+'条（只读，观众说法）' if comments_on else '已关闭'}\n弹幕：{'可抽样'+str(danmaku_n)+'条（只读，带时间、无作者）' if danmaku_on else '已关闭'}\n转写：{'可用｜引擎'+engine+'｜今日已用'+str(asr_used)+'/'+str(asr_n)+'次（只在不给主人瞎编时兜底，不自动跨端）' if asr_on else '已关闭'}\n后台视觉：{'开（每轮最多升级1条）' if auto_vision else '关（只记下本来会看哪一条，不下载、不花模型钱）'}；筛选记录{shadows}条，其中待升级{would}条\n兴趣{interest}条；我提的{wants}条还等你点头，不点头我不读。\n活动由首页/相关推荐/新兴趣探索驱动，不按固定推送时刻。\n下次唤醒参考：{self.store.get('next_wake','尚未安排')}{fail_line}");return
             if action in ('任务','工作台'):
                 scope=self._scope(event)
                 vision=('开（每轮最多升级1条，媒体并发1）' if bool(self.config.get('auto_vision',True))

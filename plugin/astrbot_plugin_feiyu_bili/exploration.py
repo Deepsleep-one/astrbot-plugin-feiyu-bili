@@ -13,7 +13,8 @@ import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 
-__all__ = ['plan_exploration', 'safe_query', 'next_wake', 'scheduler_due']
+__all__ = ['plan_exploration', 'safe_query', 'next_wake', 'scheduler_due',
+           'active_minutes_left', 'align_to_window', 'share_allowance', 'spread_rest']
 TZ = timezone(timedelta(hours=8))
 _BVID = re.compile(r'BV[0-9A-Za-z]{10}\Z')
 _FIELDS = ('title', 'topic', 'author', 'bvid', 'note')
@@ -155,6 +156,109 @@ def next_wake(rest_minutes) -> str:
     rest = min(240, max(30, rest_minutes)) if type(rest_minutes) is int else 60
     minutes = max(30.0, rest * random.uniform(0.9, 1.1))
     return (datetime.now(TZ) + timedelta(minutes=minutes)).isoformat()
+
+
+def _active_window(quiet_start=23, quiet_end=9):
+    """(start_hour, end_hour, length_minutes) of the *talkative* window.
+
+    ``quiet_start == quiet_end`` means "no quiet hours", i.e. 24h awake.
+    """
+    try:
+        start = min(23, max(0, int(quiet_start)))
+        end = min(23, max(0, int(quiet_end)))
+    except (TypeError, ValueError):
+        start, end = 23, 9
+    if start == end:
+        return 0, 24, 24 * 60
+    length = ((start - end) % 24) * 60
+    return end, start, length or 24 * 60
+
+
+def active_minutes_left(moment, quiet_start=23, quiet_end=9) -> int:
+    """Minutes of talkative time left *today*, 0 when currently inside quiet hours.
+
+    Used only for scheduling: it decides how evenly the remaining rounds are spread,
+    never whether browsing may happen (browsing and liking continue around the clock).
+    """
+    _, _, length = _active_window(quiet_start, quiet_end)
+    if moment is None:
+        return length
+    hour = moment.hour + moment.minute / 60.0
+    start, end, length = _active_window(quiet_start, quiet_end)
+    into = ((hour - start) % 24) * 60 if length >= 24 * 60 else ((hour - start) % 24) * 60
+    if length >= 24 * 60:
+        return max(0, int(24 * 60 - into))
+    if into > length:                     # inside the quiet block
+        return 0
+    return max(0, int(length - into))
+
+
+def share_allowance(daily, moment, quiet_start=23, quiet_end=9) -> int:
+    """How many shares the day has "earned" by ``moment``, so 5 shares spread out.
+
+    One slot is available as soon as the talkative window opens, the rest unlock
+    linearly over the day, so an early burst cannot eat the whole quota by noon.
+    Returns 0 during quiet hours and for a non-positive daily budget.
+    """
+    try:
+        daily = max(0, int(daily))
+    except (TypeError, ValueError):
+        return 0
+    if not daily or moment is None:
+        return 0
+    _, _, length = _active_window(quiet_start, quiet_end)
+    if length >= 24 * 60:
+        into = (moment.hour * 60 + moment.minute)
+    else:
+        start, _, length = _active_window(quiet_start, quiet_end)
+        into = ((moment.hour + moment.minute / 60.0 - start) % 24) * 60
+        if into >= length:            # quiet_start exactly: the window has closed
+            return 0
+    ratio = min(1.0, max(0.0, into / length))
+    # +1e-9 so an exact slot boundary counts as earned instead of losing a hair to float error.
+    return min(daily, 1 + int(daily * ratio + 1e-9))
+
+
+def spread_rest(active_left, rounds_left, *, lo=30, hi=240) -> int:
+    """Divide the talkative time left by the rounds left, clamped to 30..240 min.
+
+    Without this the planner's own ``rest_minutes`` could run the whole daily
+    quota out before noon; with it the remaining rounds land across the day.
+    """
+    try:
+        left = max(0, int(active_left))
+        rounds = max(1, int(rounds_left))
+    except (TypeError, ValueError):
+        return 60
+    if left <= 0:
+        return hi
+    return max(lo, min(hi, int(round(left / rounds))))
+
+
+def align_to_window(stamp, quiet_start=23, quiet_end=9):
+    """Push a wake time that lands in quiet hours to the next talkative start.
+
+    Rounds are not forbidden at night, but a round that cannot share is a wasted
+    slot: with ten rounds a day, night rounds would eat the quota the evening
+    needs. Aligning the schedule keeps the day's rounds where the shares can go.
+    """
+    try:
+        moment = _timestamp(stamp)
+    except (ValueError, TypeError, OverflowError):
+        return stamp
+    start, end, length = _active_window(quiet_start, quiet_end)
+    if length >= 24 * 60:
+        return stamp
+    hour = moment.hour + moment.minute / 60.0
+    into = ((hour - start) % 24) * 60
+    if into < length:
+        return stamp
+    target = moment.replace(hour=start % 24, minute=0, second=0, microsecond=0)
+    # `start` is the talkative opening hour; the quiet block ends there.
+    guess = moment.replace(hour=start, minute=0, second=0, microsecond=0)
+    if guess <= moment:
+        guess += timedelta(days=1)
+    return guess.isoformat()
 
 
 def _timestamp(value):

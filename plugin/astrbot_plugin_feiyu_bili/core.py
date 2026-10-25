@@ -6,6 +6,28 @@ import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+_PACING = None
+
+
+def _pacing():
+    """The pure scheduling helpers, importable both as a package and as a bare file.
+
+    The offline tests load this module straight from disk (no package), so a plain
+    ``from .exploration import ...`` would fail there; loading the sibling file by
+    path keeps one implementation instead of a drifting copy.
+    """
+    global _PACING
+    if _PACING is None:
+        try:
+            from . import exploration as module
+        except ImportError:
+            import importlib.util
+            target = Path(__file__).with_name('exploration.py')
+            spec = importlib.util.spec_from_file_location('_feiyu_exploration_for_core', target)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        _PACING = module
+    return _PACING
 
 TZ = timezone(timedelta(hours=8))
 BVID = re.compile(r'^BV[0-9A-Za-z]{10}$')
@@ -152,10 +174,16 @@ class Browser:
         if quiet(now().hour,int(self.cfg.get('quiet_start',23)),int(self.cfg.get('quiet_end',9))):return False
         last=self.store.last_delivery()
         cooldown=max(30,int(self.cfg.get('share_cooldown_minutes',120)))
-        return not last or (now()-last).total_seconds()>=cooldown*60
+        if last and (now()-last).total_seconds()<cooldown*60:return False
+        # Spread the daily budget instead of spending it all before noon: only the
+        # share slots the day has earned by now are spendable. Browsing and liking
+        # are never limited by this.
+        daily=max(0,int(self.cfg.get('daily_shares',5)))
+        earned=_pacing().share_allowance(daily,now(),int(self.cfg.get('quiet_start',23)),int(self.cfg.get('quiet_end',9)))
+        return self.store.daily_count()<earned
 
     async def _deliver(self,item,target,message):
-        did=self.store.reserve(item,target,message,min(3,max(0,int(self.cfg.get('daily_shares',2)))))
+        did=self.store.reserve(item,target,message,min(5,max(0,int(self.cfg.get('daily_shares',5)))))
         if not did:return 'quota_or_duplicate'
         try:
             sent=await asyncio.wait_for(self.sender(target,message),timeout=30)

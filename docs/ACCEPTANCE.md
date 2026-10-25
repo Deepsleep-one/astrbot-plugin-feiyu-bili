@@ -150,6 +150,15 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py    
 | A91 | 异常原文只进库、不进日志（日志只有类型） | 同上：`assertNotIn("private-token", warning)` 且 `last_error.message` 含原文 |
 | A92 | `Browser.run` 接受 per-call `transcribe`，且转写不能买点赞/分享 | `test_run_accepts_a_transcribe_callback_without_mutating_like_gates` |
 
+## A93–A96：v0.8.2 每天五条并摊到全天
+
+| 编号 | 协议 | 离线下怎么证明 |
+|---|---|---|
+| A93 | 每日分享最多 5 条，第 6 条被拒 | `test_delivery_reservation_caps_at_five`（五条不同视频依次 sent，第六条 `quota_or_duplicate`，`daily_count()==5`） |
+| A94 | 分享额度按全天阶梯解锁，早上发不完、晚上还有 | `test_allowance_unlocks_one_slot_at_a_time_across_the_day`（09→1、12→2、15→3、18→4、21→5）、`test_morning_allows_only_the_earned_slot`、`test_later_in_the_day_the_next_slot_unlocks`、`test_evening_all_five_can_go_out_but_not_six` |
+| A95 | 静默时段额度为 0；手动路径不受静默限制 | `test_quiet_hours_and_empty_budget_unlock_nothing`、`test_quiet_hours_and_manual_paths` |
+| A96 | 轮次间隔按剩余时间摊开且不排进静默段 | `test_spread_rest_divides_and_clamps`、`test_active_minutes_left_counts_down_to_quiet_start`、`test_align_to_window_pushes_night_rounds_to_the_opening` |
+
 ## B. 真实证据
 
 2026-10-25 本机联网跑过一次（脚本 `_tools\live_accept.py`，产物 `_tools\live_accept.json`、`_tools\live\shown\frame_*.jpg`）；同日 17:37 生产部署后又在容器内跑了一次（`_tools\prod_e2e.py`，临时库、不碰生产 `browse.db`）：真实字幕 202 段、下载 28,045,001B、4 帧、`visual_observed`。
