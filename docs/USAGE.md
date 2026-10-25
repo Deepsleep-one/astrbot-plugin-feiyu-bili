@@ -96,3 +96,20 @@ setsid nohup python3 /opt/qqbot/astrbot/data/_asr/host_asr_relay.py > /opt/qqbot
 ## 五、明确不做
 
 收藏、投币、评论回复、私信、上传；不改人格文件、不改说话方式；不自动语音；不自动读她提的候选；不把签名媒体 URL 落库或给模型；不让画面证据反过来放宽点赞/分享；也不让机器转写放宽分享资格或提高点赞额度（它只是**新增一种可以成立点赞的证据来源**），不调云 ASR、不外发音频（跨机时音轨只在本机，云端只发 bvid/cid）；不回复评论、不点赞评论、不建陌生人档案；不爬取评论区（最多跟 2 个楼中楼线程、只下一层）；不发弹幕、不点赞弹幕、不滚屏抓弹幕，弹幕只当观众反应，不当作者观点也不当画面。
+
+
+## 生产现状（2026-10-25 起）
+
+- 云端容器跑 v0.8.0，`asr_endpoint=http://172.17.0.1:18081` + `asr_endpoint_token`（32 位，已强制校验）。
+- **云端不装、不跑任何 whisper 模型**：`_asr/asr_env` 与 `_asr/models` 已删除，容器里 `import faster_whisper` 直接失败。
+  想让「云端偷偷跑 small」在技术上也不可能，除非重新装 1.2GB 依赖。
+- 执行端在本机：`asr_service.py`（`127.0.0.1:18080`）+ 反向 SSH 隧道 + 宿主 relay（`172.17.0.1:18081`），
+  三者都由「开机自启」拉起：云端 `feiyu-asr-relay.service`（systemd，`Restart=always`），
+  本机 `%APPDATA%\…\Startup\feiyu_asr_up.cmd` → `C:\Users\16pro\AppData\Local\feiyu_asr\up.cmd`。
+- 自检：容器内 `curl -H "X-Feiyu-Token: <口令>" http://172.17.0.1:18081/health` 应回
+  `{"ok": true, "engine": "faster-whisper", "model": "small", "busy": false}`；无口令回 `{"ok": false, "reason": "forbidden"}`。
+- 本机日志：`05_B站浏览/_tools/_logs/asr_service.log`、`asr_tunnel.log`；云端：`/opt/qqbot/astrbot/data/_asr/relay.log`。
+- 常见故障：`remote port forwarding failed for listen port 18080` = 本机有旧 ssh 隧道占着端口，`taskkill /IM ssh.exe /F`，
+  循环 15 秒后自恢复；`remote_missing` = 隧道或本机服务没起来；`remote_busy` = 上一条还在转写（并发固定 1）。
+- 口令与私钥**不要**写进仓库或对话：口令在云端配置与 `C:\Users\16pro\AppData\Local\feiyu_asr\token.txt`，
+  私钥用 `C:\Users\16pro\AppData\Local\feiyu_asr\` 之外的一份受 ACL 收紧的副本。

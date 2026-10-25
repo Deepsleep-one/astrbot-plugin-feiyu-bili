@@ -144,3 +144,14 @@ docker exec astrbot sh /AstrBot/data/_asr/bench/bench_model.sh base 0 120 2 9999
 ```
 
 插件侧对应配置：`asr_lib_dir=/AstrBot/data/_asr/asr_env`、`asr_model_dir=/AstrBot/data/_asr/models`、`asr_model=base`（或 `small`，在内存够的机器上）。
+
+## 上线后的现状（2026-10-25）
+
+- **执行端 = 本机**（32GB，small/int8/4 线程）；云端容器**不装运行时、不放权重**：
+  `_asr/asr_env`（439MB）与 `_asr/models`（720MB）已删除，容器内 `import faster_whisper` → `ModuleNotFoundError`。
+- 云端插件配置 `asr_endpoint=http://172.17.0.1:18081` + `asr_endpoint_token`；链路
+  容器 → 宿主 `host_asr_relay.py`（systemd 常驻）→ 反向 SSH 隧道（只绑云端回环 `127.0.0.1:18080`）→ 本机 `asr_service.py`。
+- 实测健康检查（容器内）：`{"ok": true, "engine": "faster-whisper", "model": "small", "busy": false}`；无口令 → `forbidden`。
+- 真实往返（容器发起，`BV1HiHN6zETj`/752.4s）：本机下载音轨 → 解码 → small → **78.0 秒**返回 149 段 2243 字。
+- 内存已回到安全线：`available 689MB`、`astrbot` RSS 315MB；删除模型后 `dmesg | grep -c "killed process" == 0`（不再 OOM）。
+- 结论仍然成立：**这个 1.7GB 的机器不该跑 small**。它现在只做 HTTP 转发，模型推理在本机。

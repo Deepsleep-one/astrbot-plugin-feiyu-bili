@@ -101,7 +101,8 @@ docker restart astrbot
 - 弹幕返回体异常大或解析耗时明显（已设 4MiB/20000 节点上限，仍应观察）。
 - 弹幕内容出现在手账的 `author_view` 或被当成画面描述 —— 说明提示词约束失效，应立刻回滚并复查 `journal.py`。
 
-回滚后如需再上线，先看 `docs/IMPLEMENTATION_PROGRESS.md` 第 5 节的「未完成/需批准」。
+回滚后如需再上线，先看 `IMPLEMENTATION_PROGRESS.md` 第 6 节的「未完成/需批准」。
+
 ## v0.8.0 本机按需 ASR 的额外注意
 
 - 新增三表：`asr_jobs`/`asr_segments`/`asr_daily`，`user_version` 6 → 7。全部 `CREATE TABLE IF NOT EXISTS`，回滚到 v0.7.0 时旧代码不查这三张表，无害。
@@ -119,4 +120,23 @@ docker restart astrbot
 - 手账的 `author_view` 里出现机器转写原文，或被当成画面描述 —— 提示词约束失效，回滚并复查 `journal.py`。
 - 任何一次真实点赞无法用「本次 ASR 证据 + 既有点赞规则」解释清楚 —— 立刻关 `asr_enabled` 并回滚点赞路径。
 
-回滚后如需再上线，先看 `docs/IMPLEMENTATION_PROGRESS.md` 第 5 节的「未完成/需批准」。
+
+
+## 生产现状与「跨机转写」部件的回滚（2026-10-25）
+
+云端已于 2026-10-25 20:35 直接部署到 v0.8.0（跨 v0.5/v0.6/v0.6.1/v0.7 全部改动），
+部署前整包备份在 `/opt/qqbot/feiyu-bili-backups/20261025-201854-v040-pre-v080/`（plugin/config/browse.db，700）。
+
+跨机转写由三件外部部件组成，回滚插件时它们不会自动消失，需要单独处理：
+
+| 部件 | 位置 | 关掉的办法 |
+|---|---|---|
+| 云端 relay（systemd） | `/etc/systemd/system/feiyu-asr-relay.service` → `/opt/qqbot/astrbot/data/_asr/host_asr_relay.py` | `systemctl disable --now feiyu-asr-relay` |
+| 云端插件指向执行端的配置 | `astrbot_plugin_feiyu_bili_config.json` 的 `asr_endpoint` / `asr_endpoint_token` | 置空 `asr_endpoint`（等价于「用本地 worker」，而云端没有运行时 → 会如实报不可用） |
+| 本机自启与服务 | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\feiyu_asr_up.cmd` + `C:\Users\16pro\AppData\Local\feiyu_asr\{up,service,tunnel}.cmd` | 删掉 Startup 里的 `feiyu_asr_up.cmd`，再 `taskkill /IM ssh.exe /F` 与结束两个 `python.exe`（服务/隧道循环） |
+
+- 云端**已删除** `_asr/asr_env`（439MB）与 `_asr/models`（720MB）：容器里 `import faster_whisper` 现在 `ModuleNotFoundError`，
+  即「云端不再跑 base/small」这件事由**依赖不存在**保证，而不是靠配置自律。重新装回去要重新下 1.2GB，且 small 会 OOM。
+- 回滚到 v0.4.0 及更早：`asr_endpoint` 等键被旧代码忽略；`_asr/` 只剩脚本，留着无害（220K）。
+- 判断该不该回滚的信号：云端出现 `exitCode=137`（说明又有人把模型装回容器）、
+  `relay.log` 里持续 `RemoteDisconnected`、或本机服务日志里出现非本插件来源的请求。

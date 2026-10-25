@@ -216,17 +216,19 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py
 3. ~~真实字幕验收~~ → **已完成**（见 5.2：202 段 timed）。
 4. ~~生产部署~~ → **已完成**（v0.4.0 已上线，见 5.2 与 `ROLLBACK.md`）。
 5. ~~M5 自动视觉的灰度~~ → **已按主人要求打开**（2026-10-25：`auto_vision` 默认 true）。仍保留 `auto_vision_shadow`：关掉 `auto_vision` 就退回只记录判定。打开后每轮最多升级 1 条、`auto_vision_frames` 帧（默认 4，方案建议 8–12）。
-6. **v0.5.0 / v0.6.x / v0.7.0 生产部署**：云端仍是 v0.4.0。部署需主人批准（会重启 AstrBot）。
+6. ~~v0.5.0 / v0.6.x / v0.7.0 生产部署~~ → **已完成（2026-10-25 20:35，直接上到 v0.8.0）**：备份 `/opt/qqbot/feiyu-bili-backups/20261025-201854-v040-pre-v080/`，部署后日志 `Plugin astrbot_plugin_feiyu_bili (v0.8.0)`、`auto=False likes=True bound=True decoder=True`；线上库 `user_version=7`。
 7. **videoshot 快照来源**：已实现但默认没有调用入口；只有在主人明确批准后才会作为无解码器时的降级来源，且证据必须标 `source=videoshot` 与缩略图分辨率。
 8. **自我成长的真实效果**：只在离线测试里验证过。真实链路上还要确认记忆插件版本支持 `add_record(evidence=..., op_key=...)`（本机 03_长期记忆 源码支持），以及长期库里不会因夜间整理把她自己的整理当成主人原话。
 9. ~~只读评论的真实接口~~ → **已联网核验**（2026-10-25，无 Cookie，`BV1HiHN6zETj`）：`upper.mid` 为 int、评论者 `row.mid` 为 int、`member.mid` 是字符串、`floor` 已为 null；据此修掉「`is_up` 永远为假」与「楼层号恒 0」两处真缺陷并补回归测试。该覆盖缺口已在 v0.6.1 补上，并**在真实数据上验证过**：`BV1hCnw65ELL` 实跑 `replies(limit=8)` 返回 5 条，含 1 条 UP 主置顶（385 赞）与 1 条 UP 主楼中楼回答（428 赞），清洗全过；`_tools/probe_nested.py` 扫首页推荐 6 个视频、每个跟进前 3 个线程，命中 1 处 UP 主楼中楼回复，其余 0 是该 UP 主本来就没回。
 10. ~~M6 可选 ASR~~ → **已按主人 2026-10-25 的新决策实现（v0.8.0，离线）**，旧方案里「需逐项点头」的问号由这次指令直接回答：CPU+INT8、按需启动、单条 <30 分钟、每日 5 次、并发 1、只留临时文件、允许 ASR 证据参与点赞但不放宽分享。**只剩真正跑一次真实推理与部署**（见第 12 条）。
 11. ~~只读弹幕的真实接口~~ → **已联网核验**（2026-10-25，无 Cookie，见 5.3）：`comment.bilibili.com/<cid>.xml` 返回 200 + chunked 的合法 `<i>`，`p` 第 1 段确为浮点秒，真实体里没有 DOCTYPE/ENTITY，弹幕按 cid 分P。据此把「没有弹幕」与「弹幕功能已关闭」（`<text_side>`）分开、并改掉会误导的「原始条目数」措辞。**唯一仍未证明的是生产环境内的同一路径**（云端仍是 v0.4.0，不含弹幕代码）。
-12. **v0.8.0 ASR：代码与离线验收已完成；第一步（装运行时 / 下权重 / 真实推理实测）已于 2026-10-25 在云端容器做完**，数据在 `ASR_BENCH.md`。剩下三件仍需主人点头：
-    - **执行位置**（首版只允许一个权威执行端）：云端 1.7GB 内存下只有 `tiny`/`base` 能安全跑（base 峰值约 420MB、RTF 0.39；tiny 约 310MB、RTF 0.195），`small` 加载约 590MB 会把 AstrBot 一起 OOM 杀掉（实测 3 次 `exitCode=137`）。要么云端跑 base、要么给机器加内存跑 small、要么改由本机跑（本机需装 ffmpeg + 运行时）。
-    - **生产部署**：云端仍是 v0.4.0；v0.5.0–v0.8.0 全部待部署（部署会重启 AstrBot）。
-    - **真实点赞验收**：门槛已在离线测试里证明（合格才允许、弱证据不得点赞、仍不分享），但**没有对任何真实视频点过赞**；真实点赞验收要单独记录，不能用 mock 通过冒充上线。
-    - 已完成的部分：运行时落在 `/AstrBot/data/_asr/asr_env`（448MB，faster-whisper 1.2.1 / ctranslate2 4.8.3 / av 16.1.0 / onnxruntime 1.31.0，`get_cuda_device_count()==0` 确认纯 CPU）；权重 tiny 75MB、base 145MB、small 504MB 落在 `/AstrBot/data/_asr/models/`；HF 直连不通，走 `hf-mirror.com`；临时音轨与切片已清理。
+12. ~~v0.8.0 ASR~~ → **已上线（2026-10-25）**，三件事都已落地：
+    - **执行位置（主人已定：本机跑 small，云端不跑模型）**：云端 `_asr/asr_env`（439MB）与 `models/`（三档权重 720MB）**已删除**，容器内 `import faster_whisper` 现在报 `ModuleNotFoundError`；`_asr/` 只剩 220K 脚本（relay + probe + bench）。云端内存回到 `available 689MB`、`astrbot` 容器 RSS 315MB，删除后**没有再出现 OOM kill**（`dmesg | grep -c "killed process" == 0`）。
+    - **通道**：容器 `asr_endpoint=http://172.17.0.1:18081` + 32 位 `asr_endpoint_token`（`X-Feiyu-Token` 已强制，本机 `asr_service.py` 与配置里的口令一致）→ 宿主 `host_asr_relay.py`（`172.17.0.1:18081`）→ 反向 SSH 隧道（只绑云端 `127.0.0.1:18080`）→ 本机 `127.0.0.1:18080`。实测容器内 `curl -H "X-Feiyu-Token: …" http://172.17.0.1:18081/health` → `{"ok": true, "engine": "faster-whisper", "model": "small", "busy": false}`；无口令返回 `{"ok": false, "reason": "forbidden"}`。
+    - **开机自启**：云端 `/etc/systemd/system/feiyu-asr-relay.service`（`enabled` + `active`，`Restart=always`）；本机 `%APPDATA%\…\Startup\feiyu_asr_up.cmd` → `C:\Users\16pro\AppData\Local\feiyu_asr\up.cmd` 拉起 `service.cmd` + `tunnel.cmd` 两个循环（纯 ASCII launcher，中文路径从 GBK 的 `tools_path.txt` 读入）。
+    - 仍然**只有**本机跑模型；云端插件只发 `bvid/cid`、只收回文字。真实单条 752.4s：本机 small 推理 73.79s、峰值 833MB。
+13. ~~真实点赞验收~~ → **已做（2026-10-25，`BV17iHG6XEsF`）**：走插件自己的 `has_liked → reserve_like → like(单写) → like_result → 回读`，B站回读 `has_like=1`、`relation.like=True`；配额用尽时被正确拦下。细节见 `ACCEPTANCE.md` 的 B15。**未做的部分**：没有让 LLM 决策层自己产出这一次点赞（那一天 3 次额度已被她的后台轮次用完，本次验收用临时上限 4 完成，配置仍是 3）。
+14. ~~GitHub 同步~~ → **已发布 v0.8.0**（2026-10-25，commit `2c05a07`，42 个文件）：README 重写到 v0.8.0、文档五件套随包、测试 19 个文件全上；本地暂存树 `05_B站浏览/_publish/astrbot-plugin-feiyu-bili`，上传脚本 `_publish/upload_repo.py`（GitHub REST，单提交）。
 
 ## 7. 权限与回滚
 
