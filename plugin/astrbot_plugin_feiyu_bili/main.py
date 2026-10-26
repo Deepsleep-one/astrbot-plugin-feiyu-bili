@@ -1,6 +1,7 @@
 """大肥鱼自主逛B站：自己探索/点赞，只有想分享时才私聊；指定视频可以真读、真看画面。"""
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import random
 import shutil
@@ -20,6 +21,9 @@ from .media_worker import MediaWorker
 from .vision import describe
 from .journal import SYSTEM as JOURNAL_SYSTEM,build_prompt as journal_prompt,full_text,parse_journal,recall_line,relevant
 from .growth import forget_view,format_proposals,interest_line,propose,topic_from,view_payload,write_view
+from .read_port import BiliReadFacade
+from .share_outbox import ShareOutbox
+from .share_port import BiliSharePort
 def _http():
     """aiohttp, imported on demand.
 
@@ -89,7 +93,7 @@ class FeiyuBiliPlugin(Star):
         super().__init__(context)
         self.config=config if config is not None else {}
         self.store=None;self.client=None;self.browser=None;self.task=None
-        self.rstore=None;self.media=None
+        self.rstore=None;self.media=None;self.outbox=None
         self._active_jobs=set()
         self._reading_locks={}
         self._media_lock=asyncio.Lock()
@@ -101,6 +105,7 @@ class FeiyuBiliPlugin(Star):
         root=Path(self.config.get('data_dir') or 'data/plugin_data/astrbot_plugin_feiyu_bili')
         self.store=Store(root/'browse.db')
         self.rstore=ReadingStore(root/'browse.db')
+        self.outbox=ShareOutbox(self.store.db)
         self.media=MediaWorker(root/'media',ffmpeg=self.config.get('ffmpeg_path'),ffprobe=self.config.get('ffprobe_path'))
         credentials=str(self.config.get('credential_file') or '').strip()
         self._credential_path=Path(credentials) if credentials else root/'bili_credential.json'
@@ -110,6 +115,10 @@ class FeiyuBiliPlugin(Star):
         self.browser.can_send=self._can_send
         self.browser.can_like=self._can_like
         self.browser.can_queue=lambda automatic: bool(self.config.get('enabled',True)) and bool(self.store.get('auto',False))
+        if bool(self.config.get('share_handoff',False)):
+            # 交接打开：分享改成写 outbox，由陪伴端唯一发送。默认关，行为与老版一致。
+            self.browser.handoff=self._handoff_share
+            logger.info('[feiyu-bili] 分享交接已打开：分享只写 outbox，B站不再自己发')
         self.task=asyncio.create_task(self._loop())
         # Anything left in media/asr is from a crashed run: audio is temporary by contract.
         leftovers=self._cleanup_asr()
@@ -169,12 +178,69 @@ class FeiyuBiliPlugin(Star):
             query='兴趣 喜欢 游戏 终末地 历史 策略 科技 硬件 最近在忙',cfg={'max_memory_chars':1000,'core_max_chars':300,'max_recalled':3})
         return binding,persona+'\n\n'+ctx['state'],ctx['memory']
 
+    # ---- Token 计量（默认关闭；只记元数据，计量出问题绝不影响读视频/写手账）----
+    def _token_meter(self):
+        """懒加载计量器：只有 token_meter_enable=true 时才建；建不起来就当没开。"""
+        cached=getattr(self,'_token_meter_singleton',None)
+        if cached is not None:return cached or None
+        self._token_meter_singleton=False  # 先占位：失败不反复重试
+        if not self.config.get('token_meter_enable',False):return None
+        try:
+            import importlib,os
+            lib=importlib.import_module(f"{__package__ or 'astrbot_plugin_feiyu_bili'}.feiyu_usage")
+            data_dir=Path(self.config.get('data_dir') or 'data/plugin_data/astrbot_plugin_feiyu_bili')
+            data_dir.mkdir(parents=True,exist_ok=True)
+            sidecar=data_dir/'token_usage.db'
+            key_path=data_dir/'token_pseudonym.key'
+            if not key_path.exists():
+                key_path.write_bytes(os.urandom(32))
+                try:key_path.chmod(0o600)
+                except OSError:pass  # Windows 上尽力而为，不是安全边界
+            queue=lib.QueuedLedger(lib.LocalLedger(sidecar,lib.LedgerLimits()))
+            queue.start()
+            meter=lib.LogicalMeterV1(queue,pseudonym_key=key_path.read_bytes(),enabled=True)
+            logger.info('[feiyu-bili] token 计量已开启（只记元数据）：%s',sidecar.name)
+            self._token_meter_singleton=meter
+            return meter
+        except Exception as exc:  # noqa: BLE001 - 计量不该拖垮插件
+            logger.warning('[feiyu-bili] token 计量没起来，按原样调用：%s',type(exc).__name__)
+            return None
+
+    def _meter_info(self,pid,image_urls):
+        """一条只含元数据的 CallInfo；模型名同步拿不到就留空，不联网、不重试。"""
+        import inspect,importlib
+        lib=importlib.import_module(f"{__package__ or 'astrbot_plugin_feiyu_bili'}.feiyu_usage")
+        model=''
+        try:
+            manager=getattr(self.context,'provider_manager',None)
+            lookup=getattr(manager,'get_provider_by_id',None)
+            provider=lookup(pid) if callable(lookup) and not inspect.iscoroutinefunction(lookup) else None
+            if provider is not None:
+                getter=getattr(provider,'get_model',None)
+                if callable(getter):model=str(getter() or '')
+                if not model:
+                    cfg=getattr(provider,'provider_config',None)
+                    if isinstance(cfg,dict):model=str(cfg.get('model') or cfg.get('id') or '')
+        except Exception:  # noqa: BLE001 - 元数据拿不到就留空，不能反过来影响这次调用
+            model=''
+        # 库的枚举里 bili 的来源只有 bili_text/bili_vision（record.SOURCES），用别的名字会被静默丢弃。
+        return lib.CallInfoV1(source='bili_vision' if image_urls else 'bili_text',
+            operation='describe' if image_urls else 'generate',provider_key=pid or 'unknown',
+            model=model,api_mode='chat_nonstream',codec='astrbot_reported_v1')
+
     async def _llm(self,system,prompt,image_urls=None,provider_id=None):
         binding,_,_,_=self._verified_binding()
         pid=str(provider_id or '').strip() or str(self.config.get('provider_id') or '').strip()
         if not pid:pid=await self.context.get_current_chat_provider_id(umo=binding['umo'])
         extra={'image_urls':list(image_urls)} if image_urls else {}
-        resp=await self.context.llm_generate(chat_provider_id=pid,system_prompt=system,prompt=prompt,tools=None,**extra)
+        def call():
+            return self.context.llm_generate(chat_provider_id=pid,system_prompt=system,prompt=prompt,tools=None,**extra)
+        meter=self._token_meter()
+        if meter is None:resp=await call()
+        else:
+            try:info=self._meter_info(pid,image_urls)
+            except Exception:info=None
+            resp=await call() if info is None else await meter.call(call,info)
         return (getattr(resp,'completion_text','') or '').strip()
 
     async def _vision_ready(self):
@@ -206,6 +272,65 @@ class FeiyuBiliPlugin(Star):
     # ---- reading: real subtitles, real frames, real journal -------------
     def _scope(self,event):
         return str(event.unified_msg_origin)
+
+    def _share_generation(self,target,page=1):
+        """交接号：同一天、同一会话、同一分P 恒为同一个号，供对账和去重。"""
+        day=now().strftime('%Y-%m-%d')
+        raw=f'{day}|{(target or "").strip()}|{int(page or 1)}'
+        return 'g'+hashlib.sha1(raw.encode('utf-8')).hexdigest()[:23]
+
+    async def _handoff_share(self,item,target,message):
+        """把这一条分享写进 outbox 交给陪伴端，**这里一条都不发**。
+
+        返回 True 表示写进去了（或本来就在），False 表示没写成功。
+        失败也只是 False，绝不回退成自己发——发送权已经交出去了。
+        """
+        body=str(message or '').strip()
+        bvid=str((item or {}).get('bvid') or '').strip()
+        page=int((item or {}).get('page') or 1)
+        target=str(target or '').strip()
+        if not body or not bvid or not target:return False
+        outbox=self.outbox
+        if outbox is None and self.store is not None:outbox=ShareOutbox(self.store.db)
+        self.outbox=outbox
+        if outbox is None:return False
+        generation=self._share_generation(target,page)
+        try:
+            # 那一行正文里还带着标题和链接，但 generation 只认「哪一天、发给谁、哪一分P」：
+            # 同一条视频当天重试不会变成两个号，换了视频才是另一个号。
+            row=outbox.enqueue(generation=generation,scope=target,bvid=bvid,target=target,
+                               message=body,page=page)
+        except Exception as exc:
+            logger.warning('[feiyu-bili] 分享没写进 outbox（%s）：%s',type(exc).__name__,exc)
+            return False
+        if row.get('duplicate'):
+            logger.info('[feiyu-bili] 分享交接：%s 已经在 outbox 里，不重复写',generation)
+        else:
+            logger.info('[feiyu-bili] 分享交接：%s 已写进 outbox，等陪伴端认领',generation)
+        return True
+
+    def bili_share_port(self):
+        """分享交接面（M6-D）：给陪伴插件一个同步的 outbox 入口。
+
+        它只做三件事：submit() 把「该发这一条」写进 outbox、claim() 把待发
+        的一条原子地交给发送端、ck() 把结果收回来。**它自己不发送**——这正是
+        M6-D 的意义：发送权只有一个，B站这边只出主意和记账。
+        不联网、不读凭证、不碰 deliveries、不改额度。
+        """
+        if self.outbox is None:
+            self.outbox=ShareOutbox(self.store.db) if self.store is not None else None
+        if self.outbox is None:
+            return None
+        return BiliSharePort(self,outbox=self.outbox)
+
+    def bili_read_port(self):
+        """只读桥的入口：给陪伴插件一个**同步、只读、不抛**的快照对象（M6-A）。
+
+        返回的是 facade 对象，不是快照本身——对端还要按自己的白名单再过一遍。
+        这里刻意不读凭证、不联网、不写库、不改额度：能看到的只有这个实例
+        已经读到的东西。
+        """
+        return BiliReadFacade(self)
 
     def _lock(self,key):
         return self._reading_locks.setdefault(key,asyncio.Lock())
@@ -1246,9 +1371,20 @@ class FeiyuBiliPlugin(Star):
                 engine=(('可用（'+where+'）') if self._asr_probe and self._asr_probe.get('available')
                         else ('不可用（'+where+'）' if self._asr_probe else '未探测（首次转写时才问）'))
                 err=self._last_autonomy_error()
+                handoff = bool(self.config.get('share_handoff',False))
+                if handoff:
+                    try:
+                        box = self.outbox.counts() if self.outbox is not None else {}
+                    except Exception:
+                        box = {}
+                    handoff_line = (f"\n分享由谁发：交给陪伴端（share_handoff 打开，这里只写 outbox）"
+                                    f"｜待认领{box.get('pending',0)}条，已回执{box.get('acked',0)}条，"
+                                    f"说不清{box.get('unknown',0)}条")
+                else:
+                    handoff_line = "\n分享由谁发：B站自己发（share_handoff 关着，交接面没接管）"
                 fail_line=(f"\n最近一次自主活动失败：{err.get('at','')[11:16]} {err.get('type','')}: {err.get('message','')[:120]}"
                            if err else '')
-                yield event.plain_result(f"自主活动：{'开' if self.store.get('auto',False) else '关'}；点赞：{'开' if self._likes_enabled() else '关'}；会话：{'已绑定' if self.store.get('binding') else '未绑定'}\n今日浏览轮次{self.store.round_count()}/{share_rounds}，点赞占额{self.store.daily_likes()}，分享{self.store.daily_count()}/{share_daily}条（此刻按全天节奏已解锁{share_now}条；23–9点不发）。凭证：{'已配置，实际有效性按请求核验' if creds else '未配置'}\n指定视频阅读：{'可用（能抽帧看画面）' if decoder else '只能读字幕，缺 ffmpeg 无法抽帧'}；手账待核对{pending}条，认识{knows}条\n评论：{'可读第一页'+str(comments_n)+'条（只读，观众说法）' if comments_on else '已关闭'}\n弹幕：{'可抽样'+str(danmaku_n)+'条（只读，带时间、无作者）' if danmaku_on else '已关闭'}\n转写：{'可用｜引擎'+engine+'｜今日已用'+str(asr_used)+'/'+str(asr_n)+'次（只在不给主人瞎编时兜底，不自动跨端）' if asr_on else '已关闭'}\n后台视觉：{'开（每轮最多升级1条）' if auto_vision else '关（只记下本来会看哪一条，不下载、不花模型钱）'}；筛选记录{shadows}条，其中待升级{would}条\n兴趣{interest}条；我提的{wants}条还等你点头，不点头我不读。\n活动由首页/相关推荐/新兴趣探索驱动，不按固定推送时刻。\n下次唤醒参考：{self.store.get('next_wake','尚未安排')}{fail_line}");return
+                yield event.plain_result(f"自主活动：{'开' if self.store.get('auto',False) else '关'}；点赞：{'开' if self._likes_enabled() else '关'}；会话：{'已绑定' if self.store.get('binding') else '未绑定'}\n今日浏览轮次{self.store.round_count()}/{share_rounds}，点赞占额{self.store.daily_likes()}，分享{self.store.daily_count()}/{share_daily}条（此刻按全天节奏已解锁{share_now}条；23–9点不发）。凭证：{'已配置，实际有效性按请求核验' if creds else '未配置'}\n指定视频阅读：{'可用（能抽帧看画面）' if decoder else '只能读字幕，缺 ffmpeg 无法抽帧'}；手账待核对{pending}条，认识{knows}条\n评论：{'可读第一页'+str(comments_n)+'条（只读，观众说法）' if comments_on else '已关闭'}\n弹幕：{'可抽样'+str(danmaku_n)+'条（只读，带时间、无作者）' if danmaku_on else '已关闭'}\n转写：{'可用｜引擎'+engine+'｜今日已用'+str(asr_used)+'/'+str(asr_n)+'次（只在不给主人瞎编时兜底，不自动跨端）' if asr_on else '已关闭'}\n后台视觉：{'开（每轮最多升级1条）' if auto_vision else '关（只记下本来会看哪一条，不下载、不花模型钱）'}；筛选记录{shadows}条，其中待升级{would}条\n兴趣{interest}条；我提的{wants}条还等你点头，不点头我不读。\n活动由首页/相关推荐/新兴趣探索驱动，不按固定推送时刻。\n下次唤醒参考：{self.store.get('next_wake','尚未安排')}{handoff_line}{fail_line}");return
             if action in ('任务','工作台'):
                 scope=self._scope(event)
                 vision=('开（每轮最多升级1条，媒体并发1）' if bool(self.config.get('auto_vision',True))

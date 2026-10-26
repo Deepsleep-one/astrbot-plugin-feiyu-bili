@@ -1,6 +1,7 @@
 """Bounded autonomous browsing; independent like/share decisions and durable quotas."""
 from __future__ import annotations
 import asyncio
+import inspect
 import json
 import re
 import sqlite3
@@ -167,6 +168,9 @@ class Browser:
         self.can_send=lambda automatic:True
         self.can_like=lambda automatic:False
         self.can_queue=lambda automatic:self.can_send(automatic)
+        # 分享交接（M6-D）：设了它，分享就走 outbox 交给陪伴端发，这里一条都不发。
+        # 留 None 就是老的「B站自己发」，行为一字不变。
+        self.handoff=None
 
     def _send_window(self,automatic):
         if not self.can_send(automatic):return False
@@ -182,9 +186,34 @@ class Browser:
         earned=_pacing().share_allowance(daily,now(),int(self.cfg.get('quiet_start',23)),int(self.cfg.get('quiet_end',9)))
         return self.store.daily_count()<earned
 
+    def handoff_wanted(self):
+        """配置说「交交接」，但钩子没挂上——这时候宁可不发，也不能偷偷自己发。
+
+        这是「只剩一个发送者」的兜底：开关在配置里是 true，`_deliver` 就不会走本地发送。
+        """
+        return bool(self.cfg.get('share_handoff',False))
+
     async def _deliver(self,item,target,message):
         did=self.store.reserve(item,target,message,min(5,max(0,int(self.cfg.get('daily_shares',5)))))
         if not did:return 'quota_or_duplicate'
+        if self.handoff is not None:
+            # 交接打开：额度照旧先占（reserve 是原子的），但这条消息不从这里出去。
+            # 交接面自己坏了也只是'handoff_unavailable'——绝不回退成自己发。
+            try:
+                queued=self.handoff(item,target,message)
+                if inspect.isawaitable(queued):queued=await queued
+            except asyncio.CancelledError:
+                self.store.delivery_result(did,'handoff_failed');raise
+            except Exception:
+                self.store.delivery_result(did,'handoff_failed');raise
+            status='handoff' if queued else 'handoff_unavailable'
+            self.store.delivery_result(did,status)
+            return status
+        if self.handoff_wanted():
+            # 配置说要交接、可钩子没挂上（初始化顺序或插件没起来）：照样不发。
+            # 额度已经占掉，这一条就此作废——少发一条远好于发两遍。
+            self.store.delivery_result(did,'handoff_unavailable')
+            return 'handoff_unavailable'
         try:
             sent=await asyncio.wait_for(self.sender(target,message),timeout=30)
             status='sent' if sent is True else 'uncertain'
@@ -194,18 +223,31 @@ class Browser:
             self.store.delivery_result(did,'uncertain');raise
 
     async def flush_pending(self,target):
+        """把「排队等发」的提议逐条处理掉，返回这条链路真正交出去的条数。
+
+        以前这里命中第一条就 return，结果一次唤醒只能推进一条；交接打开后
+        更明显：队列越攒越长。现在把能处理的都处理掉，命中额度/重复就停。
+        """
         if self.lock.locked() or not self._send_window(True):return 0
+        handled=0
         async with self.lock:
             for row in self.store.pending():
                 if row['target']!=target:
                     self.store.suggestion_result(row['bvid'],'target_changed');continue
                 if self.store.db.execute('SELECT 1 FROM deliveries WHERE bvid=?',(row['bvid'],)).fetchone():
                     self.store.suggestion_result(row['bvid'],'already_attempted');continue
-                if not self._send_window(True):return 0
+                if not self._send_window(True):return handled
                 status=await self._deliver({'bvid':row['bvid']},target,row['message'])
-                if status!='quota_or_duplicate':self.store.suggestion_result(row['bvid'],status)
-                return int(status=='sent')
-        return 0
+                if status=='quota_or_duplicate':
+                    # 额度用完或这一条已经在别处发过：后面再试也一样，先停。
+                    return handled
+                self.store.suggestion_result(row['bvid'],status)
+                if status in ('sent','handoff'):
+                    handled+=1
+                if status=='handoff_unavailable':
+                    # 交接面不可用：不要继续把后面的也标成失败，留着下次再说。
+                    return handled
+        return handled
 
     async def run(self,*,target,system,memory='',topic='',automatic=False,dry_run=False,plan=None,observer=None,transcribe=None):
         # `transcribe` is per-call so a background round can grant speech recognition
@@ -326,6 +368,9 @@ class Browser:
                     if self._send_window(automatic):
                         status=await self._deliver(item,target,rendered)
                         result['sent']+=int(status=='sent')
+                        if status in ('handoff','handoff_unavailable'):
+                            result['handoff']=result.get('handoff',0)+int(status=='handoff')
+                            if status=='handoff_unavailable':result['status']='handoff_unavailable'
                         if status=='uncertain':result['status']='send_uncertain'
                     elif automatic and self.can_queue(automatic):
                         self.store.offer(bvid,target,rendered);result['deferred']+=1

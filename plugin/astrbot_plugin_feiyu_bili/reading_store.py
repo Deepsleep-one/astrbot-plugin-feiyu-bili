@@ -675,6 +675,18 @@ class ReadingStore:
             (scope_hash(scope), max(0, int(limit)))).fetchall()
         return [dict(r) for r in rows]
 
+    def readings(self, scope: str, *, limit: int = 10) -> list[dict]:
+        """Recent parts she read in this session, newest first (read-only).
+
+        Added for the read-only bridge (`read_port.py`): the companion plugin needs
+        "what did she actually read here", and poking at the table row by row from
+        outside would be worse. This writes nothing and creates no revision.
+        """
+        rows = self.db.execute(
+            "SELECT * FROM readings WHERE scope=? ORDER BY fetched_at DESC LIMIT ?",
+            (scope_hash(scope), max(0, int(limit)))).fetchall()
+        return [dict(r) for r in rows]
+
     def latest_reading(self, scope: str) -> dict:
         """The most recent part she read in this session, or {} when there is none."""
         row = self.db.execute(

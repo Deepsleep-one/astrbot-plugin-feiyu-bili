@@ -44,6 +44,11 @@
     "type": "int",
     "default": 120
   },
+  "share_handoff": {
+    "description": "分享交给陪伴插件唯一发送（M6-D）：打开后这里的分享只写 outbox、自己一条都不发；关着就是老样子由B站自己发。打开前请确认陪伴插件 bili_share_mode=coordinated 且 relay 开着",
+    "type": "bool",
+    "default": false
+  },
   "quiet_start": {
     "description": "QQ免打扰开始小时UTC+8；期间仍可以浏览点赞，推荐暂存最多24小时",
     "type": "int",
@@ -68,6 +73,11 @@
     "description": "持久化浏览/点赞/分享记录目录，独立于长期记忆",
     "type": "string",
     "default": "data/plugin_data/astrbot_plugin_feiyu_bili"
+  },
+  "token_meter_enable": {
+    "description": "记录插件侧模型调用的 token 用量：只记元数据，不存正文",
+    "type": "bool",
+    "default": false
   },
   "vision_enabled": {
     "description": "允许对主人指定/深读的视频真实抽帧交给多模态模型；关闭则只读字幕",
