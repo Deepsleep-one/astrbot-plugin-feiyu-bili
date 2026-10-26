@@ -388,8 +388,11 @@ class AutonomyResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.get("auto"), "一次瞬时失败不该关掉自主活动")
         due = datetime.fromisoformat(self.store.get("next_wake"))
         minutes = (due - core.now()).total_seconds() / 60
+        # 退避至少 25 分钟；上限不能写死 40——22:30 之后重试会落进 23–9 的免打扰，
+        # 代码会把它顺延到次日 9:00，那是正确行为，不是失败。
         self.assertGreaterEqual(minutes, 25)
-        self.assertLessEqual(minutes, 40)
+        self.assertLessEqual(minutes, 24 * 60)
+        self.assertFalse(core.quiet(due.hour, 23, 9), "退避后的时间不该落在免打扰时段")
         error = json.loads(self.store.get("last_error"))
         self.assertEqual(error["type"], "RuntimeError")
         self.assertIn("人格未能读取", error["message"])
