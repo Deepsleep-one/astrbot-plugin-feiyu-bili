@@ -489,8 +489,10 @@ class SharePacingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status, "sent")
         with patch.object(core, "now", return_value=self.at(22)):
             status = await self.browser._deliver({"bvid": video(6)["bvid"]}, TARGET, "这个有意思。")
-        self.assertEqual(status, "quota_or_duplicate")
-        self.assertEqual(self.store.daily_count(), 5)
+            self.assertEqual(status, "quota_or_duplicate")
+            # 计数必须也在同一时刻读：`daily_count()` 默认按真实"今天"取日，
+            # 不 patch 就会随运行日期漂移（这个测试曾在写它的当天通过、三天后失败）。
+            self.assertEqual(self.store.daily_count(), 5)
 
 
 if __name__ == "__main__":

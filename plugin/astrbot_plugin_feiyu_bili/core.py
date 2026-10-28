@@ -109,6 +109,18 @@ class Store:
         return self.db.execute('SELECT count(*) FROM likes WHERE day=?',(day or now().date().isoformat(),)).fetchone()[0]
     def round_count(self, day=None):
         return self.db.execute('SELECT count(*) FROM rounds WHERE day=?',(day or now().date().isoformat(),)).fetchone()[0]
+    def daily_videos(self, day=None):
+        return self.db.execute('SELECT count(*) FROM videos WHERE substr(read_at,1,10)=?',(day or now().date().isoformat(),)).fetchone()[0]
+    def daily_stats(self, day=None):
+        """Today's real activity in one row: the tally for "how many did you watch".
+
+        The notes handed to the model are a three-row sample, not a count, so a model
+        asked to add them up under-reports. These numbers are the tally; the sample is detail.
+        """
+        day=day or now().date().isoformat()
+        row=self.db.execute('SELECT count(*) n, coalesce(sum(interested),0) i FROM videos WHERE substr(read_at,1,10)=?',(day,)).fetchone()
+        return {'day':day,'videos':int(row[0]),'interested':int(row[1]),
+                'rounds':self.round_count(day),'shares':self.daily_count(day),'likes':self.daily_likes(day)}
     def begin_round(self, automatic, max_rounds=3, moment=None):
         moment=moment or now();day=moment.date().isoformat()
         with self.db:

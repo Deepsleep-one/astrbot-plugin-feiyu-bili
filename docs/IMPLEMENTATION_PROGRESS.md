@@ -236,6 +236,23 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py
       `test_autonomy.py` 24 → 29（早上只放行已解锁那一条、下午解锁下一条、傍晚五条能发第六条第被拒、
       静默与手动路径、投递占额硬顶 5）。全量 **407 OK（19 文件）**。
 
+17. ~~**v0.9.3：她能说清「今天刷了多少条」**~~ → **已上线（2026-10-28）**：
+
+    - 起因：主人问「今天刷了多少条」，她只能报 1–3 条。原因不是数据缺失，而是**交给模型的只有 `store.history(3)`
+      三条明细**，没有任何总数；模型只能把明细当全部，于是少报（她当时还诚实地说「没法确认，所以不往数上凑」）。
+    - 修法：新增 `core.Store.daily_videos()` 与 `daily_stats()`（当天视频数、有兴趣数、轮次数、分享数、点赞数），
+      并在 `browsing_memory` 注入一行 `[今天的真实浏览统计（系统计数…）]`，明确写「用这里的数字回答，
+      不要把下面三条明细当成全部」；`feiyu_browse_bilibili` 的返回也带上「今天累计 X/30 条、Y/10 轮」。
+    - 顺手修一处版本漂移：`@register(...,'0.8.2')` 与 `metadata.yaml` 的 `v0.9.2` 早已不一致（AstrBot 用 metadata，
+      所以没报错），现统一为 `0.9.3`。
+    - 测试：`tests/test_plugin.py` 新增 `test_tally_answers_how_many_watched_today`（4 条记录、明细只给 3 条、
+      统计行必须报 4/30），`tests/test_core.py` 新增 `test_daily_stats_counts_videos_rounds_and_actions`。
+    - 顺带修掉一个**日期型测试炸弹**：`test_delivery_reservation_caps_at_five` 的 `daily_count()` 读在 `patch(now)`
+      之外，按真实「今天」取日，写它的当天能过、三天后再跑就失败（`0 != 5`）。现把断言移进同一时刻的 patch 内。
+    - 全量回归 **409 OK（19 文件）**。
+    - **文档滞后提示**：`metadata.yaml` 已是 v0.9.x（含 `share_outbox` 交接面与 `read_port` 只读接口），
+      但本文件与 `MANUAL.md` 仍停在 v0.8.2 的能力清单——那部分改动尚未补进文档，下次一并处理。
+
 ## 6. 未完成 / 需要主人批准
 
 1. ~~生产环境装 ffmpeg~~ → **不需要装**：容器自带 ffmpeg 7.1.5 + ffprobe（`decoder=True`）。

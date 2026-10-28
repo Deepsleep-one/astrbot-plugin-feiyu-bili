@@ -392,6 +392,19 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.store.get("last_owner_activity"))
         self.assertEqual(self.db.mock_calls, [])
 
+    async def test_tally_answers_how_many_watched_today(self):
+        for i in range(4):
+            self.store.remember({"bvid": f"BV{i:010d}", "title": f"离线标题{i}"}, "topic", "subtitle",
+                                {"note": "私人浏览笔记", "interested": i % 2 == 0})
+        req = SimpleNamespace(system_prompt="原始人格")
+        await self.instance.browsing_memory(Event(text="你今天刷了多少条视频"), req)
+        self.assertIn("今天的真实浏览统计", req.system_prompt)
+        self.assertIn("共读过 4/30 条视频", req.system_prompt)
+        self.assertIn("不要把下面三条明细当成全部", req.system_prompt)
+        # 明细仍是最近三条，总数只能来自统计行
+        self.assertEqual(len(self.store.history(3)), 3)
+        self.assertEqual(self.store.daily_stats()["videos"], 4)
+
     async def test_owner_unrelated_chat_gets_tool_guidance_but_no_history(self):
         self.add_history()
         req = SimpleNamespace(system_prompt="原始人格")

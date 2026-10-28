@@ -159,6 +159,13 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py    
 | A95 | 静默时段额度为 0；手动路径不受静默限制 | `test_quiet_hours_and_empty_budget_unlock_nothing`、`test_quiet_hours_and_manual_paths` |
 | A96 | 轮次间隔按剩余时间摊开且不排进静默段 | `test_spread_rest_divides_and_clamps`、`test_active_minutes_left_counts_down_to_quiet_start`、`test_align_to_window_pushes_night_rounds_to_the_opening` |
 
+## A97–A98：v0.9.3 今日统计口径
+
+| 编号 | 协议 | 离线下怎么证明 |
+|---|---|---|
+| A97 | 被问「今天刷了多少条」时，答案来自系统计数而不是三条明细 | `test_tally_answers_how_many_watched_today`（4 条记录 → 注入「共读过 4/30 条视频」且仍只给三条明细）、`test_daily_stats_counts_videos_rounds_and_actions` |
+| A98 | 统计只算当天，且不因抽样而缩水 | 同一用例断言 `videos=2/interested=1/rounds=1` 与 `daily_videos()==2`；日期由 `core.now()` 取东八区当天 |
+
 ## B. 真实证据
 
 2026-10-25 本机联网跑过一次（脚本 `_tools\live_accept.py`，产物 `_tools\live_accept.json`、`_tools\live\shown\frame_*.jpg`）；同日 17:37 生产部署后又在容器内跑了一次（`_tools\prod_e2e.py`，临时库、不碰生产 `browse.db`）：真实字幕 202 段、下载 28,045,001B、4 帧、`visual_observed`。

@@ -233,6 +233,20 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         # A real run after preview still processes and delivers the video.
         self.assertEqual((await self.run_browser())["sent"], 1)
 
+    async def test_daily_stats_counts_videos_rounds_and_actions(self):
+        self.store.remember({"bvid": BVS[0], "title": "一", "author": "a"}, "t", "search",
+                            {"note": "n", "interested": True})
+        self.store.remember({"bvid": BVS[1], "title": "二", "author": "a"}, "t", "search",
+                            {"note": "n", "interested": False})
+        rid = self.store.begin_round(False, max_rounds=10)
+        self.assertIsNotNone(rid)
+        stats = self.store.daily_stats()
+        self.assertEqual(stats["videos"], 2)
+        self.assertEqual(stats["interested"], 1)
+        self.assertEqual(stats["rounds"], 1)
+        self.assertEqual(self.store.daily_videos(), 2)
+        self.assertEqual(stats["day"], core.now().date().isoformat())
+
     async def test_daily_quota_exhausted_does_not_send_or_reserve(self):
         browser = self.new_browser(daily_shares=1)
         await self.run_browser(browser)
