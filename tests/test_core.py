@@ -345,6 +345,32 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_browser(browser))["status"], "empty")
         self.assertEqual(len(self.rows("rounds")), 2)
 
+    async def test_round_limit_reports_cap_usage_and_resets_tomorrow(self):
+        # A bare "round_limit" left her unable to say why or when to come back.
+        browser = self.new_browser(daily_rounds=1)
+        await self.run_browser(browser)
+        result = await self.run_browser(browser)
+        self.assertEqual(result["status"], "round_limit")
+        self.assertEqual(result["cap"], 1)
+        self.assertEqual(result["used"], 1)
+
+    async def test_round_reports_which_videos_it_read(self):
+        result = await self.run_browser()
+        seen = result["seen"]
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["bvid"], BVS[0])
+        self.assertEqual(seen[0]["title"], "离线测试视频")
+        self.assertEqual(seen[0]["source"], "subtitle")
+        self.assertTrue(seen[0]["chars"] > 0)
+        self.assertTrue(seen[0]["interested"])
+        self.assertIn(seen[0]["like_state"], ("liked", "already_liked", "quota", ""))
+
+    async def test_subtitle_without_timeline_is_reported_as_text_only_evidence(self):
+        self.client.subtitle.return_value = {"text": "只有正文没有时间轴", "reason": "ok"}
+        result = await self.run_browser()
+        self.assertEqual(result["seen"][0]["source"], "subtitle")
+        self.assertEqual(result["seen"][0]["segments"], 0)
+
     async def test_automatic_quiet_window_across_calendar_days(self):
         moments = (MOMENT.replace(hour=23), (MOMENT + timedelta(days=1)).replace(hour=0),
                    (MOMENT + timedelta(days=1)).replace(hour=8),

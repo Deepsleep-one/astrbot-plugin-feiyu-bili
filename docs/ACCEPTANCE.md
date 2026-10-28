@@ -165,6 +165,10 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py    
 |---|---|---|
 | A97 | 被问「今天刷了多少条」时，答案来自系统计数而不是三条明细 | `test_tally_answers_how_many_watched_today`（4 条记录 → 注入「共读过 4/30 条视频」且仍只给三条明细）、`test_daily_stats_counts_videos_rounds_and_actions` |
 | A98 | 统计只算当天，且不因抽样而缩水 | 同一用例断言 `videos=2/interested=1/rounds=1` 与 `daily_videos()==2`；日期由 `core.now()` 取东八区当天 |
+| A99 | 手账材料是整P字幕，不再只到第一页 | `plugin/tests/test_reading.py::TranscriptTests.test_every_segment_reaches_the_journal_material`（83 条全进 `items`、`last_t=03:43`）、`tests/test_reading_plugin.py::test_journal_reads_the_whole_part_not_only_the_first_page`（prompt 含「第60句」与「这一P共 60 条时间轴」） |
+| A100 | 超长字幕截断时明说「省略了 N 条」，且规则禁止把它写成遗漏 | `test_long_part_is_clipped_with_head_tail_and_an_explicit_marker`、`tests/test_reading_plugin.py::test_journal_says_so_when_the_material_was_clipped`、`plugin/tests/test_journal.py::test_clipped_material_is_labelled_and_cannot_become_an_omission`、`journal.SYSTEM` 第 8 条（含「不代表视频到哪里」） |
+| A101 | 刷站回报带标题/BV/证据来源/字数，`round_limit` 说清上限与重置 | `tests/test_reading_plugin.py::test_round_report_names_titles_and_bvids`、`test_round_limit_report_states_cap_usage_and_reset`（含 `10/10` 与 `00:00`）、`test_busy_round_report_explains_the_lock`、`tests/test_core.py::test_round_limit_reports_cap_usage_and_resets_tomorrow`、`test_round_reports_which_videos_it_read` |
+| A102 | 「上次/之前」只能引用记录里真实存在的标题与 BV | `tests/test_plugin.py::test_browsing_memory_forbids_inventing_previous_episodes`（注入含「只能引用下面真实记录里出现过的标题与 BV 号」「绝不编造当时的内容、数字或剧情」） |
 
 ## B. 真实证据
 

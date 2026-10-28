@@ -10,7 +10,7 @@
 这是为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 写的 Python 插件，
 运行在现有 AstrBot 内，不需要额外的 DSH 进程。
 
-当前版本 **v0.9.3**。
+当前版本 **v0.9.4**。
 
 ## 它做什么
 
@@ -185,7 +185,7 @@ python -m unittest discover -s tests -v
 python -m unittest discover -s plugin/astrbot_plugin_feiyu_bili/tests -v
 ```
 
-共 **409 项**离线测试（19 个文件），覆盖权限拒绝、严格 JSON、去重与配额、夜间暂存、
+共 **424 项**离线测试（19 个文件），覆盖权限拒绝、严格 JSON、去重与配额、夜间暂存、
 发送失败不重试、点赞只增不重试、客户端域名/重定向/凭证隔离、分页游标签名、
 抽帧参数与 JPEG 尺寸、手账八栏与召回、认识修正与墓碑、shadow 筛选、评论/弹幕只读边界、
 每日转写额度与并发 1、总 deadline、远程执行端契约等。

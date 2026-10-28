@@ -13,7 +13,7 @@ import re
 import shutil
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 import test_plugin as support
@@ -267,6 +267,74 @@ class ReadingPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("以前读过的相关材料与认识", request.system_prompt)
         self.assertIn("上下游标高", request.system_prompt)
         self.assertIn("不当作新证据", request.system_prompt)
+
+    async def test_journal_reads_the_whole_part_not_only_the_first_page(self):
+        # The owner's complaint: 83 lines read to 03:46, but the journal said the
+        # transcript stopped at 01:05 and filed the rest as an omission. The journal
+        # material must be the whole part, with the real span stated.
+        self.client.segments = talking_segments(60)
+        await self.read()
+        await self.command("手账")
+        prompt = self.context.llm_generate.await_args.kwargs["prompt"]
+        self.assertIn("第60句", prompt)
+        self.assertIn("这一P共 60 条时间轴", prompt)
+        self.assertIn("下面是全部内容", prompt)
+        self.assertNotIn("省略了", prompt)
+        # The "a clipped excerpt is not the end of the video" rule lives in the system prompt.
+        self.assertIn("不代表视频到哪里",
+                      self.context.llm_generate.await_args.kwargs["system_prompt"])
+
+    async def test_journal_says_so_when_the_material_was_clipped(self):
+        # Past the character budget the material is clipped, but the head, the tail and an
+        # explicit "N lines skipped" marker all stay — so "the rest" can never look absent.
+        self.client.segments = [
+            {"from_ms": i * 1000, "to_ms": i * 1000 + 900,
+             "text": f"第{i + 1}句：" + "管网要按上下游标高排，不然改了也倒灌。" * 4}
+            for i in range(220)]
+        await self.read()
+        await self.command("手账")
+        prompt = self.context.llm_generate.await_args.kwargs["prompt"]
+        self.assertIn("第1句", prompt)
+        self.assertIn("第220句", prompt)
+        self.assertIn("省略了", prompt)
+        self.assertIn("不要把它写成遗漏", prompt)
+        self.assertIn("中间省略了", prompt)
+
+    def test_round_report_names_titles_and_bvids(self):
+        text = self.instance._round_report({"status": "ok", "read": 1, "sent": 0, "liked": 0,
+                                            "no_subtitle": 0,
+                                            "seen": [{"bvid": BVID, "title": "老城区排水管网",
+                                                      "author": "某UP主", "source": "subtitle",
+                                                      "chars": 2400, "segments": 60,
+                                                      "interested": True, "liked": False,
+                                                      "like_state": ""}]})
+        self.assertIn("老城区排水管网", text)
+        self.assertIn(f"BV {BVID}", text)
+        self.assertIn("官方字幕", text)
+        self.assertIn("2400 字", text)
+        self.assertIn("合计：读了 1 条", text)
+
+    def test_round_limit_report_states_cap_usage_and_reset(self):
+        text = self.instance._round_report({"status": "round_limit", "read": 0, "sent": 0,
+                                            "liked": 0, "cap": 10, "used": 10})
+        self.assertIn("10/10", text)
+        self.assertIn("00:00", text)
+        self.assertIn("不占这个轮次额度", text)
+        self.assertNotIn("round_limit", text)
+
+    def test_busy_round_report_explains_the_lock(self):
+        self.assertIn("还没跑完", self.instance._round_report({"status": "busy"}))
+
+    async def test_browse_tool_reports_what_it_read(self):
+        round_result = {"status": "ok", "read": 1, "sent": 0, "liked": 0, "no_subtitle": 0,
+                        "seen": [{"bvid": BVID, "title": "老城区排水管网", "author": "某UP主",
+                                  "source": "subtitle", "chars": 1200, "segments": 30,
+                                  "interested": True, "liked": False, "like_state": ""}]}
+        with patch.object(self.instance, "_run", AsyncMock(return_value=round_result)):
+            text = await self.instance.explore_tool(Event(), "历史")
+        self.assertIn("老城区排水管网", text)
+        self.assertIn(f"BV {BVID}", text)
+        self.assertIn("官方字幕", text)
 
     async def test_other_session_cannot_see_or_keep_this_journal(self):
         text = await self.read()

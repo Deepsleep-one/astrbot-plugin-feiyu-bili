@@ -17,6 +17,7 @@ _BVID_IN_TEXT = re.compile(r"(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])")
 MAX_SEGMENT_CHARS = 2000
 PAGE_SEGMENTS = 24
 PAGE_CHARS = 2600
+TRANSCRIPT_CHARS = 14000
 MIN_FRAME_GAP_S = 15.0
 MAX_FRAMES = 40
 FIRST_BATCH_FRAMES = 4
@@ -195,6 +196,64 @@ def render_page(store, reading_id: str, revision: int, offset: int, *, scope: st
         "subtitle_reason": record.get("subtitle_reason", ""),
         "items": items, "offset": offset, "total": total, "done": done,
         "cursor": None if done else store.cursor(reading_id, revision, next_offset, scope),
+        "coverage": coverage(rows, record["duration"]),
+    }
+
+
+def transcript(store, reading_id: str, revision: int, *, scope: str,
+               max_chars: int = TRANSCRIPT_CHARS) -> dict:
+    """Every timeline line of one part, for material that must not be mistaken for the opening minute.
+
+    The paged view is right for a person reading along, but it is the wrong material for a
+    journal: page one ends within the first minute or two of a long video, and anything the
+    model writes about "the rest" then either invents it or files real content as `omissions`.
+    So the journal gets the whole part within a character budget. When the budget bites, the
+    kept head and the kept tail are separated by an explicit "N lines skipped" marker, so a
+    reader can never mistake a clipped transcript for a short video.
+    """
+    record = store.reading(reading_id, scope)
+    if not record or int(record["revision"]) != int(revision):
+        raise ReadingError("not_found", "这次阅读记录不存在，或已被新的阅读取代。")
+    rows = store.segments(reading_id, revision)
+    total = len(rows)
+    head_budget = max(1, int(max_chars * 0.75))
+    kept, used = [], 0
+    for index, row in enumerate(rows):
+        text = row["text"]
+        if used + len(text) > head_budget:
+            break
+        used += len(text)
+        kept.append((index, row))
+    kept_indexes = {index for index, _ in kept}
+    tail = []
+    for index in range(total - 1, -1, -1):
+        if index in kept_indexes:
+            break
+        text = rows[index]["text"]
+        if used + len(text) > max_chars:
+            break
+        used += len(text)
+        tail.append((index, rows[index]))
+    tail.reverse()
+    tail_indexes = {index for index, _ in tail}
+    dropped = total - len(kept) - len(tail)
+    items = [{"n": row["idx"] + 1, "t": _stamp(row["from_ms"]), "text": row["text"]}
+             for _, row in kept]
+    if dropped > 0:
+        first_skipped = rows[kept[-1][0] + 1]["idx"] + 1 if kept else 1
+        items.append({"n": first_skipped, "t": _stamp(rows[kept[-1][0] + 1]["from_ms"]) if kept else "00:00",
+                      "text": f"……（这里省略了 {dropped} 条，共 {total} 条；省略不等于视频没讲，不要把它写成遗漏）"})
+    items.extend({"n": row["idx"] + 1, "t": _stamp(row["from_ms"]), "text": row["text"]}
+                 for _, row in tail)
+    return {
+        "reading_id": reading_id, "revision": int(revision), "page": int(record["page"]),
+        "title": record["title"], "part_title": record["part_title"], "author": record["author"],
+        "duration": record["duration"], "subtitle_state": record["subtitle_state"],
+        "subtitle_reason": record.get("subtitle_reason", ""),
+        "items": items, "total": total, "kept": len(kept) + len(tail), "dropped": dropped,
+        "truncated": dropped > 0,
+        "first_t": _stamp(rows[0]["from_ms"]) if total else "",
+        "last_t": _stamp(rows[-1]["to_ms"] or rows[-1]["from_ms"]) if total else "",
         "coverage": coverage(rows, record["duration"]),
     }
 

@@ -267,8 +267,12 @@ class Browser:
         if transcribe is not None:self.transcribe=transcribe
         if self.lock.locked():return {'status':'busy','read':0,'sent':0,'liked':0}
         async with self.lock:
-            rid=None if dry_run else self.store.begin_round(automatic,min(16,max(1,int(self.cfg.get('daily_rounds',3)))))
-            if not dry_run and rid is None:return {'status':'round_limit','read':0,'sent':0,'liked':0}
+            cap_rounds=min(16,max(1,int(self.cfg.get('daily_rounds',3))))
+            rid=None if dry_run else self.store.begin_round(automatic,cap_rounds)
+            if not dry_run and rid is None:
+                # The caller has to be able to say "10/10 used, resets at midnight" instead of a bare key.
+                return {'status':'round_limit','read':0,'sent':0,'liked':0,
+                        'cap':cap_rounds,'used':self.store.round_count(),'seen':[]}
             try:
                 result=await asyncio.wait_for(self._run(target,system,memory,topic,automatic,dry_run,plan,observer),timeout=240)
                 if rid:self.store.finish_round(rid,result['status'])
@@ -294,7 +298,7 @@ class Browser:
 
     async def _run(self,target,system,memory,topic,automatic,dry_run,plan,observer=None):
         candidates,topic=await self._candidates(topic,plan,dry_run)
-        result={'status':'ok','read':0,'sent':0,'liked':0,'like_uncertain':0,'deferred':0,'decision_errors':0,'no_subtitle':0,'asr_used':0,'asr_failed':0,'asr_reason':'','topic':topic,'preview':[]}
+        result={'status':'ok','read':0,'sent':0,'liked':0,'like_uncertain':0,'deferred':0,'decision_errors':0,'no_subtitle':0,'asr_used':0,'asr_failed':0,'asr_reason':'','topic':topic,'preview':[],'seen':[]}
         max_read=min(5,max(1,int(self.cfg.get('videos_per_round',3))))
         shared=False
         for item in candidates[:12]:
@@ -358,6 +362,7 @@ class Browser:
                 except Exception:
                     pass
             if not dry_run:self.store.remember(item,topic,source,decision)
+            like_state=''
             if decision['like'] and not dry_run and self.can_like(automatic):
                 limit=min(10,max(0,int(self.cfg.get('daily_likes',3))))
                 if self.store.reserve_like(bvid,decision['note'],limit):
@@ -366,13 +371,20 @@ class Browser:
                         answer=await asyncio.wait_for(self.client.like(bvid),timeout=30)
                         status=answer.get('status') if isinstance(answer,dict) else 'uncertain'
                         status=status if status in ('liked','already_liked') else 'uncertain'
-                        self.store.like_result(bvid,status)
+                        self.store.like_result(bvid,status);like_state=status
                         result['liked']+=int(status=='liked')
                         result['like_uncertain']+=int(status=='uncertain')
                     except asyncio.CancelledError:
                         self.store.like_result(bvid,'uncertain');raise
                     except Exception:
-                        self.store.like_result(bvid,'uncertain');result['like_uncertain']+=1
+                        self.store.like_result(bvid,'uncertain');result['like_uncertain']+=1;like_state='uncertain'
+                else:
+                    like_state='quota'
+            result['seen'].append({
+                'bvid':bvid,'title':safe_text(item.get('title',''),120),'author':safe_text(item.get('author',''),60),
+                'source':source,'chars':len(text),'segments':len(sub.get('segments') or []),
+                'interested':bool(decision['interested']),'liked':bool(like_state=='liked'),
+                'like_state':like_state,'topic':topic})
             if decision['share'] and decision['message'] and not shared:
                 rendered=decision['message']+'\n'+safe_text(item.get('title',''),100)+'\nhttps://www.bilibili.com/video/'+bvid
                 result['preview'].append(rendered);shared=True

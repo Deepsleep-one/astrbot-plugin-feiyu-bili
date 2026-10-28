@@ -405,6 +405,16 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.history(3)), 3)
         self.assertEqual(self.store.daily_stats()["videos"], 4)
 
+    async def test_browsing_memory_forbids_inventing_previous_episodes(self):
+        # Her complaint #4: she could not verify whether the fabricated "last time" was fixed.
+        # The injection must say, in words, that only titles/BVs present in the records may be
+        # cited as "last time", so a future check can point at this line instead of guessing.
+        self.add_history()
+        req = SimpleNamespace(system_prompt="原始人格")
+        await self.instance.browsing_memory(Event(text="你上次看那个视频讲了啥"), req)
+        self.assertIn("只能引用下面真实记录里出现过的标题与 BV 号", req.system_prompt)
+        self.assertIn("绝不编造当时的内容、数字或剧情", req.system_prompt)
+
     async def test_owner_unrelated_chat_gets_tool_guidance_but_no_history(self):
         self.add_history()
         req = SimpleNamespace(system_prompt="原始人格")

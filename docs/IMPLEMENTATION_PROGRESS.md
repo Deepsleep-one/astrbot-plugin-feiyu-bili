@@ -253,6 +253,28 @@ D:\DSH\QQBot\astrbot-tools\astrbot\Scripts\python.exe -B test_bili_client.py
     - **文档滞后提示**：`metadata.yaml` 已是 v0.9.x（含 `share_outbox` 交接面与 `read_port` 只读接口），
       但本文件与 `MANUAL.md` 仍停在 v0.8.2 的能力清单——那部分改动尚未补进文档，下次一并处理。
 
+18. **v0.9.4：修她自己报上来的四个问题** → **已上线（2026-10-28）**：
+
+    - 起因：她读完 83 条、到 03:46 收尾，手账里却写「字幕原文到 01:05 为止」，还把后两分钟当成「遗漏」；
+      同时抱怨刷站「读了 1 条」不给标题与 BV、`round_limit` 只给个名字。
+    - **手账只看第一页**（真实缺陷）：`_write_journal` 原本 `render_page(..., offset=0)`，一页 24 条/2600 字，
+      83 条里只进前 24 条。新增 `reading.transcript()` 取整P（上限 `TRANSCRIPT_CHARS=14000`，
+      超限保留头部 75% + 尾部并在中间插入「省略了 N 条；省略不等于视频没讲」），返回
+      `total/kept/dropped/truncated/first_t/last_t`；`_write_journal` 改用它。
+    - **截断不许写成遗漏**：`journal.SYSTEM` 加第 8 条「摘录到哪里只代表材料到哪里」；
+      段落标题改「字幕原文（整P，第 n 条 · 时间）」并按整P写「这一P共 N 条时间轴（A–B）；下面是全部内容」。
+    - **刷站回报**：新增 `main._round_report()`，逐条列标题、BV、证据来源（官方字幕/机器转写/只有标题）、字数、
+      兴趣判断与点赞结果 + 合计；`round_limit` 带 `cap`/`used` 并说明「每天 00:00 北京时间重置」、
+      「读指定视频不占轮次额度」；`busy` 也改成能读懂的句子。`core.Browser._run` 的 `result` 增 `seen[]`。
+    - **防乱编前情**：`browsing_memory` 加硬约束——说到「上次/之前看过」只能引用注入记录里真实出现过的标题与
+      BV，记录里没有就说没有具体记录，绝不编内容/数字/剧情。
+    - 顺手修一个静默降级隐患：`explore_tool` 原在函数体里 `from .exploration import safe_query`，
+      离线/换加载方式时会 `ModuleNotFoundError` 并被吞成「这次浏览没有完成」，改为模块级导入。
+    - 测试：新增 15 项（`plugin/tests/test_reading.py` 21→24、`plugin/tests/test_journal.py` 12→14、
+      `tests/test_reading_plugin.py` 19→25、`tests/test_core.py` 39→42、`tests/test_plugin.py` 37→38）；
+      全量 **424 OK（19 文件）**。
+    - 未改库结构（`user_version` 仍 7）。
+
 ## 6. 未完成 / 需要主人批准
 
 1. ~~生产环境装 ffmpeg~~ → **不需要装**：容器自带 ffmpeg 7.1.5 + ffprobe（`decoder=True`）。
