@@ -194,6 +194,7 @@ python -m unittest discover -s plugin/astrbot_plugin_feiyu_bili/tests -v
 
 ## 文档
 
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md)：**更新日志**（v0.2.1 → 当前，每版做了什么、修了什么坑、数据库怎么演进）
 - [`docs/AUTONOMY.md`](docs/AUTONOMY.md)：自主活动什么时候发生（触发链、静默时段、审计表、常见「今天没动」原因）
 - [`docs/MANUAL.md`](docs/MANUAL.md)：**功能与配置手册**（能实现什么、每个数值在哪改、三套预设）
 - [`docs/USAGE.md`](docs/USAGE.md)：命令、工具、配置项与不做清单
